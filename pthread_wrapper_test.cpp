@@ -4,14 +4,12 @@
 #include <thread>
 #include <exception>
 
-using namespace congzhi;
-
 // ---------------------------
 // 1. Thread basic testing
 // ---------------------------
 void test_thread_basic() {
     std::cout << "Testing Thread Basic Functionality..." << std::endl;
-    Thread t;
+    congzhi::Thread t;
     std::cout << "Thread State: " << t.GetThreadState() << std::endl;
     // Lambda
     t.CreateThread([]() {
@@ -31,9 +29,9 @@ void test_mutex_basic() {
     std::cout << "\n\nTesting Mutex Basic Functionality..." << std::endl;
     
     // mutex test
-    Mutex m;
+    congzhi::Mutex m;
     {
-        LockGuard<Mutex> lock(m);
+        congzhi::LockGuard<congzhi::Mutex> lock(m);
         std::cout << "Mutex has been locked!" << std::endl;
     } // Unlock automatically when going out of scope.
     std::cout << "The mutex has been unlocked!" << std::endl;
@@ -54,12 +52,12 @@ void test_mutex_basic() {
 void test_condition_variable_basic() {
     std::cout << "\n\nTesting condition variable..." << std::endl;
     
-    Mutex m;
-    ConditionVariable cv;
+    congzhi::Mutex m;
+    congzhi::ConditionVariable cv;
     bool ready = false;
 
-    Thread waiter([&]() {
-        LockGuard<Mutex> lock(m);
+    congzhi::Thread waiter([&]() {
+        congzhi::LockGuard<congzhi::Mutex> lock(m);
         while (!ready) {
             cv.Wait(m);
         }
@@ -68,7 +66,7 @@ void test_condition_variable_basic() {
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
     {
-        LockGuard<Mutex> lock(m);
+        congzhi::LockGuard<congzhi::Mutex> lock(m);
         ready = true;
         std::cout << "Notifying the condition variable..." << std::endl;
         cv.NotifyOne();
