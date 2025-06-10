@@ -12,7 +12,7 @@ void test_thread_basic() {
     congzhi::Thread t;
     std::cout << "Thread State: " << t.GetThreadState() << std::endl;
     // Lambda
-    t.CreateThread([]() {
+    t.Start([]() {
         std::cout << "Hello from lambda!" << std::endl;
     });
     std::cout << "Thread State: " << t.GetThreadState() << std::endl;
@@ -80,6 +80,7 @@ void test_condition_variable_basic() {
 // Run all tests
 // ---------------------------
 int main() {
+    
     try {
         test_thread_basic();
         test_mutex_basic();

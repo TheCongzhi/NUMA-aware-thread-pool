@@ -1,6 +1,6 @@
 /*
 * Author:       Congzhi
-* Update:       2025-06-10
+* Update:       2025-06-11
 * Description:  A pthread wrapper for cross-platform compatibility. 
 * License:      MIT License
 */
@@ -72,7 +72,7 @@ private:
         try {
             data->Execute();
         } catch (...) {
-            // Log or handle exceptions here if needed
+            // Log or handle exceptions here if needed.
         }
         return nullptr;
     }
@@ -154,7 +154,7 @@ public:
 
     // Starts a uncreated thread with a callable object and its arguments.
     template <typename TFunc, typename... TArgs>
-    void CreateThread(TFunc&& f, TArgs&&... args) {
+    void Start(TFunc&& f, TArgs&&... args) {
         if (Joinable()) {
             throw std::logic_error("Thread is already running");
         }
