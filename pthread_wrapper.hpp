@@ -80,7 +80,10 @@ private:
     // Cleanup function to ensure proper resource management.
     void Cleanup() noexcept {
         if (thread_state_ == ThreadState::JOINABLE) {
-            pthread_detach(thread_handle_);
+            const int result = pthread_detach(thread_handle_);
+            if (result != 0) {
+                std::runtime_error("pthread_detach failed: " + std::string(strerror(result)));
+            }
         }
         thread_state_ = ThreadState::FINISHED;
     }
@@ -99,16 +102,15 @@ public:
         auto data = new ThreadData<task_type>(std::move(bound_task));
         
         // Create a new thread.
-        const int result = pthread_create(
+        const int result = (pthread_create(
             &thread_handle_, 
             nullptr, 
             &ThreadEntry, 
             static_cast<void*>(data)
         );
-        
         if (result != 0) {
             delete data;
-            throw std::runtime_error("pthread_create failed");
+            throw std::runtime_error("pthread_create failed: " + std::string(strerror(result)));
         }
         
         thread_state_ = ThreadState::JOINABLE;
@@ -166,6 +168,9 @@ public:
         
         using task_type = decltype(bound_task);
         auto data = new ThreadData<task_type>(std::move(bound_task));
+        if (!data) {
+            throw std::bad_alloc();
+        }
         
         const int result = pthread_create(
             &thread_handle_, 
@@ -173,12 +178,10 @@ public:
             &ThreadEntry, 
             static_cast<void*>(data)
         );
-        
         if (result != 0) {
             delete data;
-            throw std::runtime_error("pthread_create failed");
+            throw std::runtime_error("pthread_create failed: " + std::string(strerror(result)));
         }
-        
         thread_state_ = ThreadState::JOINABLE;
     }
 
@@ -209,8 +212,9 @@ public:
             throw std::logic_error("Thread not joinable");
         }
         const int result = pthread_join(thread_handle_, nullptr);
+
         if (result != 0) {
-            throw std::runtime_error("pthread_join failed");
+            throw std::runtime_error("pthread_join failed" + std::string(strerror(result)));
         }
         
         thread_state_ = ThreadState::FINISHED;
@@ -223,7 +227,7 @@ public:
         }
         const int result = pthread_detach(thread_handle_);
         if (result != 0) {
-            throw std::runtime_error("pthread_detach failed");
+            throw std::runtime_error("pthread_detach failed" + std::string(strerror(result)));
         }
         thread_state_ = ThreadState::DETACHED;
     }
@@ -249,8 +253,9 @@ public:
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
         pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_DEFAULT);
-        if (pthread_mutex_init(&mutex_handle_, &attr) != 0) {
-            throw std::runtime_error("Failed to initialize mutex");
+        const int result = pthread_mutex_init(&mutex_handle_, &attr);
+        if (result != 0) {
+            throw std::runtime_error("pthread_mutex_init failed: " + std::string(strerror(result)));
         }
         pthread_mutexattr_destroy(&attr);
     }
@@ -262,8 +267,9 @@ public:
 
     // Lock the mutex.
     void Lock() {
-        if (pthread_mutex_lock(&mutex_handle_) != 0) {
-            throw std::runtime_error("Failed to lock mutex");
+        const int result = pthread_mutex_lock(&mutex_handle_);
+        if (result != 0) {
+            throw std::runtime_error("pthread_mutex_lock failed: " + std::string(strerror(result)));
         }
     }
 
@@ -324,8 +330,9 @@ private:
 public:
     // Constructor - initializes the condition variable.
     ConditionVariable() {
-        if (pthread_cond_init(&cond_handle_, nullptr) != 0) {
-            throw std::runtime_error("Failed to initialize condition variable");
+        const int result = pthread_cond_init(&cond_handle_, nullptr); 
+        if (result != 0) {
+            throw std::runtime_error("pthread_cond_init failed: " + std::string(strerror(result)));
         }
     }
 
@@ -356,8 +363,9 @@ public:
 
     // Wait for the condition variable to be notified, using a mutex.
     void Wait( Mutex& mtx) {
-        if (pthread_cond_wait(&cond_handle_, mtx.NativeHandle()) != 0) {
-            throw std::runtime_error("Failed to wait on condition variable");
+        const int result = pthread_cond_wait(&cond_handle_, mtx.NativeHandle());
+        if (result != 0) {
+            throw std::runtime_error("pthread_cond_wait failed: " + std::string(strerror(result)));
         }
     }
 
@@ -375,8 +383,9 @@ public:
             ts.tv_sec += ts.tv_nsec / 1'000'000'000;
             ts.tv_nsec %= 1'000'000'000;
         }
-        if (pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &ts) != 0) {
-            throw std::runtime_error("Failed to wait for condition variable with timeout");
+        const int result = pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &ts);
+        if (result != 0 && result != ETIMEDOUT) {
+            throw std::runtime_error("pthread_cond_timedwait failed(time wait): " + std::string(strerror(result)));
         }
     }
 
@@ -391,19 +400,26 @@ public:
         ts.tv_sec = static_cast<time_t>(seconds);
         ts.tv_nsec = static_cast<long>(nanoseconds);
         
-        if (pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &ts) != 0) {
-            throw std::runtime_error("Failed to wait for condition variable until time point");
+        const int result = pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &ts);
+        if (result != 0 && result != ETIMEDOUT) {
+            throw std::runtime_error("pthread_cond_timedwait failed(wait until): " + std::string(strerror(result)));
         }
     }
 
     // Notify one waiting thread.
     void NotifyOne() noexcept {
-        pthread_cond_signal(&cond_handle_);
+        const int result = pthread_cond_signal(&cond_handle_);
+        if (result != 0) {
+            throw std::runtime_error("pthread_cond_signal failed: " + std::string(strerror(result)));
+        }
     }
 
     // Notify all waiting threads.
     void NotifyAll() noexcept {
-        pthread_cond_broadcast(&cond_handle_);
+        const int result = pthread_cond_broadcast(&cond_handle_);
+        if (result != 0) {
+            throw std::runtime_error("pthread_cond_broadcast failed: " + std::string(strerror(result)));
+        }
     }
 
     // Returns the native handle of the condition variable.
