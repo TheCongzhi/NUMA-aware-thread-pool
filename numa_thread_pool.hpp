@@ -1,3 +1,10 @@
+/*
+* Author:       Congzhi
+* Update:       2025-06-15
+* Description:  A cross-platform thread pool based on congzhi::Thread.
+* License:      MIT License
+*/
+
 #ifndef THREAD_POOL_HPP
 #define THREAD_POOL_HPP
 
@@ -113,14 +120,11 @@ public:
             throw std::runtime_error("No NUMA nodes available");
         }
 
-        // 为每个 NUMA 节点创建线程
         for (int node = 0; node < node_count; ++node) {
             for (size_t i = 0; i < threads_per_node; ++i) {
                 workers.emplace_back([this, node]() {
-                    // 绑定到当前 NUMA 节点
                     bind_thread_to_numa_node(node);
-                    
-                    // 执行任务循环（继承自 ThreadPoolBase）
+
                     while (true) {
                         std::function<void()> task;
                         
@@ -143,19 +147,14 @@ public:
 };
 #endif
 
-// ---------------------------
-// 跨平台线程池入口
-// ---------------------------
-class thread_pool_ {
+class ThreadPool {
 public:
-    // 自动检测平台，选择普通或 NUMA 模式
-    explicit thread_pool_(size_t threads_per_node = 1) {
+    explicit ThreadPool(size_t threads_per_node = 1) {
 #ifdef __linux__
         if (is_numa_supported()) {
             numa_pool = std::make_unique<NumaThreadPool>(threads_per_node);
         } else {
 #endif
-            // 默认普通模式（Linux/macOS）
             size_t num_threads = Thread::HardwareConcurrency();
             base_pool = std::make_unique<ThreadPoolBase>(num_threads);
 #ifdef __linux__
