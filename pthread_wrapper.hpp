@@ -1,6 +1,6 @@
 /*
 * Author:       Congzhi
-* Update:       2025-06-14
+* Create:       2025-06-11
 * Description:  A pthread wrapper for cross-platform compatibility. 
 * License:      MIT License
 */
@@ -21,7 +21,6 @@
 #include <tuple>
 #include <cassert>
 #include <chrono>
-
 
 namespace congzhi {
 
@@ -70,7 +69,7 @@ public:
         return (pthread_mutex_trylock(&mutex_handle_) == 0);
     }
 
-    // Returns the native handle of the mutex.
+    // Returns a pointer to the native handle of the mutex.
     pthread_mutex_t* NativeHandle() noexcept {
         return &mutex_handle_;
     }
@@ -236,9 +235,9 @@ public:
         pthread_cond_broadcast(&cond_handle_);
     }
 
-    // Returns the native handle of the condition variable.
-    pthread_cond_t NativeHandle() const noexcept {
-        return cond_handle_;
+    // Returns a pointer to the native handle of the condition variable.
+    pthread_cond_t* NativeHandle() noexcept {
+        return &cond_handle_;
     }
 
 };
@@ -268,6 +267,7 @@ public:
 
     // Checks if the thread is joinable.
     bool Joinable() const noexcept {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         return thread_state_ == ThreadState::JOINABLE;
     }
 
@@ -419,10 +419,10 @@ public:
         return (thread_state_ == ThreadState::JOINABLE) ? thread_handle_ : 0;
     }
 
-    // Returns the underlying native thread handle.
-    pthread_t NativeHandle() const noexcept {
+    // Returns a pointer to the underlying native thread handle.
+    pthread_t* NativeHandle() noexcept {
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        return (thread_state_ == ThreadState::JOINABLE) ? thread_handle_ : 0;
+        return (thread_state_ == ThreadState::JOINABLE) ? &thread_handle_ : 0;
     }
 
     // Returns the number of concurrent threads supported.
@@ -438,7 +438,7 @@ public:
         }
         const int result = pthread_join(thread_handle_, nullptr);
         if (result != 0) {
-            throw std::runtime_error("pthread_join failed" + std::string(strerror(result)));
+            throw std::runtime_error("pthread_join failed: " + std::string(strerror(result)));
         }
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         thread_state_ = ThreadState::FINISHED;
@@ -459,8 +459,17 @@ public:
 
     // Swap two threads.
     void Swap(Thread& other) noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        congzhi::LockGuard<congzhi::Mutex> other_lock(other.mutex_);
+        if (this == &other) {
+            return;
+        }
+        // Use branchless programming to avoid deadlocks.
+        // Ensure that the mutexes are locked in a consistent order to prevent deadlocks.
+        Thread* threads[2] = { &other, this };
+        auto first = threads[bool(this < &other)];
+        auto second = threads[!bool(this < &other)];
+
+        congzhi::LockGuard<congzhi::Mutex> lock1(first->mutex_);
+        congzhi::LockGuard<congzhi::Mutex> lock2(second->mutex_);
         std::swap(thread_handle_, other.thread_handle_);
         std::swap(thread_state_, other.thread_state_);
     }
