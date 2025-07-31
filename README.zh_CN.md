@@ -17,7 +17,7 @@
 
 本项目提供两个 `.hpp` 头文件库（header only），一个是轻量的 pthread 封装库，提供更加高级易用的 API 。还有就是 NUMA 感知的线程池库，根据底层硬件架构优化任务调度。
 
-POSIX thread 的功能非常强大，封装库也只封装了 pthread API 中的一小部分，库提供封装好的线程类（`congzhi::Thread`）、互斥锁类（`congzhi::Mutex`）、锁卫类（`congzhi::LockGuard`）和条件变量类（`congzhi::ConditionVariable`）。这些组件对 pthread 进行了 RAII 的封装，所以不用担心资源泄漏，同时提供与 C++ 标准库相似的 API ，便于上手。这些组件定义在 [[pthread_wrapper.hpp]] 文件中。
+POSIX thread 的功能非常强大，因此封装库只封装了 pthread API 中的一小部分，库提供封装好的线程类（`congzhi::Thread`）、互斥锁类（`congzhi::Mutex`）、锁卫类（`congzhi::LockGuard`）和条件变量类（`congzhi::ConditionVariable`）。这些组件对 pthread 进行了 RAII 的封装，所以不用担心资源泄漏，同时提供与 C++ 标准库相似的 API ，便于上手。这些组件定义在 [[pthread_wrapper.hpp]] 文件中。
 
 ### `congzhi::Mutex`
 
@@ -46,7 +46,7 @@ POSIX thread 的功能非常强大，封装库也只封装了 pthread API 中的
 
 对 `pthread_cond_t` 的封装，用于提供便捷的线程同步控制，用来阻塞线程并在条件被满足时将线程置于就绪队列。
 
-#### Constructors and Destructor
+#### Constructors And Destructor
 
 同样的，这个类也提供 RAII 风格的资源管理。
 
@@ -78,11 +78,11 @@ POSIX thread 的功能非常强大，封装库也只封装了 pthread API 中的
 
 - `GetThreadState()`: 测试用途，返回当前线程的状态。在封装库中，我们用一个枚举类来表示线程的不同状态。
 - `Joinable()`: 检查线程是否可Join。（相较于 `std::thread::joinable()`）
-- `Join()`: 等待线程执行结束。（相较于 `std::thread::join()）
-- `Detach()`: 准许线程独立运行，在分离线程后，线程资源就会被系统接管）
+- `Join()`: 等待线程执行结束。（相较于 `std::thread::join()`）
+- `Detach()`: 准许线程独立运行，在分离线程后，线程资源就会被系统接管（相较于 `std::thread::detach()`）
 - `Swap()`: 交换两个线程。（相较于 `std::thread::swap()`）
 - `Yield()`: 让当前执行线程放弃CPU。（相较于 `std::thread::yield()`）
-- `Start()`: 创建一个新的线程并执行。
+- `Start()`: 创建一个新的线程并执行。(改进～)
 - `GetId()`: 获得当前线程的TID。（相较于 `std::thread::get_id`）
 - `NativeHandle()`: 获得当前线程的原始句柄。（相较于 `std::thread::native_handle()`）
 - `HardwareConcurrency()`: 返回系统的CPU核心数。（相较于 `std::thread::hardware_concurrency`）
@@ -121,4 +121,11 @@ int main() {
 }
 ```
 
+您可以用下面的命令运行上面的代码：
+
+```bash
+g++ -pthread -std=c++17 start.cpp -o start && ./start && rm start
+```
+
 ## The NUMA Thread Pool
+

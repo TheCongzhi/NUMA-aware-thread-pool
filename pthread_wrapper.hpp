@@ -10,8 +10,8 @@
 
 #if defined(__APPLE__) || defined(__linux__)
 #include <pthread.h> // For pthreads -> Thread management.
-#include <unistd.h> // For sysconf -> Get number of underlying processors.
-#include <sched.h> // For sched_yield -> Yield the current thread.
+#include <unistd.h>  // For sysconf -> Get number of underlying processors.
+#include <sched.h>   // For sched_yield -> Yield the current thread.
 
 #include <functional>
 #include <utility>
