@@ -14,8 +14,7 @@
 
 // linux specific includes for NUMA support
 #ifdef __linux__
-#include <numa.h> // NUMA support library
-// #include <numaif.h> linux syscall interface
+#include "numa_wrapper.hpp"
 #endif
 
 #include <vector>
@@ -269,33 +268,23 @@ public:
 
 // NUMA-aware thread pool class - extends ThreadPoolBase for NUMA support.
 class NumaThreadPool : public ThreadPool {
-public:
-    // Check NUMA system support.
-    bool IsNumaSupported() {
-        return numa_available() == 0;
-    }
-
-    // Get the number of NUMA nodes available.
-    int NumaNodeCount() {
-        return numa_max_node() + 1;
-    }
-
-    // Set the CPU affinity, binding a thread to a specific NUMA node.
-    void BindThreadToNumaNode(int node) {
-        if (node < 0 || node >= NumaNodeCount()) {
-            throw std::out_of_range("Invalid NUMA node index");
-        }
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        
-        numa_node_to_cpus(node, &cpuset);
-        
-        if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
-            throw std::runtime_error("Failed to bind thread to NUMA node");
-        }
-    }
 private:
+    struct Worker {
+        congzhi::Thread thread;
+        std::atomic<bool> is_valid{false};
+        std::atomic<bool> should_exit{false};
+        std::atomic<bool> is_idle{false};
+        std::chrono::steady_clock::time_point idel_time_start;
+        int numa_node{-1}; // NUMA node index for this worker.
+    };
+    struct NumaNodeData {
+        std::queue<std::function<void()>> tasks;
+        congzhi::Mutex queue_mutex;
+        congzhi::ConditionVariable cond_var;
+        size_t thread_count {0}; // Number of threads bound to this NUMA node.
+    };
 
+    const int numa_node_count_{numa_max_node() + 1};
 public:
     void Start() override {
         if (!IsNumaSupported()) {
