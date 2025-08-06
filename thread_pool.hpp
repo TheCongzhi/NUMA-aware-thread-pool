@@ -1,9 +1,13 @@
-/*
-* Author:       Congzhi
-* Create:       2025-06-11
-* Description:  A cross-platform thread pool based on congzhi::Thread.
-* License:      MIT License
-*/
+/**
+ * @file thread_pool.hpp
+ * @brief A cross-platform thread pool based on congzhi::Thread.
+ * @author Congzhi
+ * @date 2025-06-11
+ * @license MIT License
+ * 
+ * This header defines the ThreadPool interface for NormalThreadPool and NumaThreadPool.
+ * 
+ */
 
 #ifndef THREAD_POOL_HPP
 #define THREAD_POOL_HPP
@@ -11,6 +15,7 @@
 #if defined(__APPLE__) || defined(__linux__)
 
 #include "pthread_wrapper.hpp"
+// #include <pthread.h> // could be explicit
 
 // linux specific includes for NUMA support
 #ifdef __linux__
@@ -31,7 +36,9 @@
 
 namespace congzhi {
 
+
 // congzhi::ThreadPool, interface for different thread pool implementations.
+
 class ThreadPool {
 public:
     virtual void Start() = 0;
@@ -64,9 +71,9 @@ private:
         std::atomic<bool> is_valid{false};
         std::atomic<bool> should_exit{false};
         std::atomic<bool> is_idle{false};
-        std::chrono::steady_clock::time_point idel_time_start;
+        std::chrono::steady_clock::time_point idle_time_start;
     };
-    mutable congzhi::Mutex worker_mutex_;
+    mutable congzhi::Mutex worker_mutex_; // M&M rule
 
     const size_t min_threads_{congzhi::Thread::HardwareConcurrency()};
     const size_t max_threads_{congzhi::Thread::HardwareConcurrency() * 2};
@@ -77,7 +84,7 @@ private:
     std::atomic<size_t> valid_thread_count_{0};
     std::queue<std::function<void()>> tasks_;
     std::atomic<bool> running_{false};
-    mutable congzhi::Mutex mutex_;
+    mutable congzhi::Mutex global_mutex_;
     congzhi::ConditionVariable cond_var_;
 
     // Monitoring thread for idle threads.
@@ -88,25 +95,27 @@ private:
         {
             congzhi::LockGuard<congzhi::Mutex> lock(worker_mutex_);
             if (worker_index >= workers_.size() || !workers_[worker_index]) {
-                throw std::out_of_range("Worker index out of range");
+                return;
             }
         }
+
         auto& worker = workers_[worker_index];
         worker->is_valid = true;
         valid_thread_count_.fetch_add(1);
+
         while (!worker->should_exit && running_) {
             std::function<void()> task;
             worker->is_idle = true;
-            worker->idel_time_start = std::chrono::steady_clock::now();
+            worker->idle_time_start = std::chrono::steady_clock::now();
             {
-                congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-                cond_var_.Wait(mutex_, [this, &worker]() {
+                congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+                cond_var_.Wait(global_mutex_, [this, &worker]() {
                     return !tasks_.empty() || worker->should_exit || !running_;
                 });
             }
             worker->is_idle = false;
             {
-                congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+                congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
                 if (!tasks_.empty()) {
                     task = std::move(tasks_.front());
                     tasks_.pop();
@@ -124,13 +133,17 @@ private:
     // Expansion logic.
     void ExpandThreads() {
         auto current_valid = valid_thread_count_.load();
-        if (current_valid >= max_threads_) return;
+        if (current_valid >= max_threads_) {
+            return;
+        }
         auto threads_target_count = (((current_valid * expand_factor_) < max_threads_) ? (current_valid * expand_factor_) : (max_threads_));
         auto threads_need_count = threads_target_count - current_valid;
-        if (threads_need_count <= 0) return;
+        if (threads_need_count <= 0) {
+            return;
+        }
         
         congzhi::LockGuard<congzhi::Mutex> lock(worker_mutex_);
-        auto create_thread_count = 0;
+        auto create_thread_count = 0ul;
         
         for (auto i = 0; i < workers_.size() && create_thread_count < threads_need_count; ++i) {
             if (!workers_[i]->is_valid) {
@@ -153,17 +166,20 @@ private:
     }
     void ShrinkThreads() {
         auto current_valid = valid_thread_count_.load();
-        if (current_valid <= min_threads_) return;
+        if (current_valid <= min_threads_) {
+            return;
+        }
         auto threads_need_remove = current_valid - min_threads_;
-        if (threads_need_remove <= 0) return;
-
+        if (threads_need_remove <= 0) {
+            return;
+        }
         auto now = std::chrono::steady_clock::now();
-        auto removed_threads_count = 0;
+        size_t removed_threads_count = 0;
         congzhi::LockGuard<congzhi::Mutex> lock(worker_mutex_);
         for (auto i = 0; i <workers_.size() && removed_threads_count < threads_need_remove; ++i) {
             auto& worker = workers_[i];
             if (worker->is_valid && worker->is_idle) {
-                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - worker->idel_time_start);
+                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - worker->idle_time_start);
             
                 if (idle_time >= idle_threshold_) {
                     worker->should_exit = true; // Mark the thread for exit.
@@ -178,12 +194,18 @@ private:
             std::this_thread::sleep_for(std::chrono::seconds(3));
             if (running_) {
                 ShrinkThreads();
+            } else {
+                break;
             }
-            
         }
     }
 public:
     NormalThreadPool() { workers_.reserve(min_threads_); }
+    ~NormalThreadPool() override { 
+        if (running_) {
+            Stop();
+        } 
+    }
     // Copying and moving are not allowed.
     NormalThreadPool(const NormalThreadPool&) = delete;
     NormalThreadPool& operator=(const NormalThreadPool&) = delete; 
@@ -223,6 +245,7 @@ public:
         running_ = false;
         cond_var_.NotifyAll(); // Notify all threads to wake up and exit.
 
+        congzhi::LockGuard<congzhi::Mutex> lock(worker_mutex_);
         for (auto& worker : workers_) {
             if (worker && worker->thread.Joinable()) {
                 worker->thread.Join(); // Wait for all worker threads to finish.
@@ -231,6 +254,7 @@ public:
         }
         workers_.clear();
         valid_thread_count_ = 0;
+        tasks_ = std::queue<std::function<void()>>(); // Clear remaining tasks
     }
 
     void Enqueue(std::function<void()> task) override {
@@ -239,7 +263,7 @@ public:
         }
         // Enqueue the task queue.
         {
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+            congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
             tasks_.emplace(std::move(task));
         }
         cond_var_.NotifyOne(); // Notify one worker thread to wake up and process the task.
@@ -251,14 +275,14 @@ public:
     }
 
     bool IsRunning() const override {
-        return running_;
+        return running_.load();
     }
 
     size_t WorkerCount() const override {
-        return workers_.size();
+        return valid_thread_count_.load();
     }
     size_t TaskCount() const override {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
         return tasks_.size();
     }
 };
@@ -274,53 +298,313 @@ private:
         std::atomic<bool> is_valid{false};
         std::atomic<bool> should_exit{false};
         std::atomic<bool> is_idle{false};
-        std::chrono::steady_clock::time_point idel_time_start;
+        std::chrono::steady_clock::time_point idle_time_start;
         int numa_node{-1}; // NUMA node index for this worker.
     };
     struct NumaNodeData {
         std::queue<std::function<void()>> tasks;
         congzhi::Mutex queue_mutex;
         congzhi::ConditionVariable cond_var;
-        size_t thread_count {0}; // Number of threads bound to this NUMA node.
+        std::atomic<size_t> thread_count {0}; // Number of threads bound to this NUMA node
     };
 
-    const int numa_node_count_{numa_max_node() + 1};
-public:
-    void Start() override {
-        if (!IsNumaSupported()) {
-            throw std::runtime_error("NUMA is not supported on this system");
+    const int numa_node_count_{congzhi::Numa::NumaNodeCount()};
+    const size_t min_threads_per_node_{4};
+    const size_t max_threads_per_node_{8};
+    const size_t expand_factor_{2};
+    const std::chrono::seconds idle_threshold_{10}; // For threads pool expansion and contraction.
+    
+    std::vector<NumaNodeData> node_data_;
+    std::vector<std::unique_ptr<Worker>> workers_;
+    std::atomic<size_t> valid_thread_count_{0}; // Total valid threads across all NUMA nodes
+    std::atomic<bool> running_{false};
+    mutable congzhi::Mutex global_mutex_;
+
+    // Monitoring thread for threads expansion/shrinking
+    std::unique_ptr<congzhi::Thread> monitor_thread_;
+    std::atomic<bool> monitoring_{false};
+
+    void WorkerLoop(size_t worker_index){
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+            if (worker_index >= workers_.size() || !workers_[worker_index]) {
+                return;
+            }
         }
+        Worker& worker = *workers_[worker_index];
+        auto node_num = worker.numa_node;
+
+        if (node_num < 0 || node_num >= numa_node_count_) {
+            return;
+        }
+
+        auto& node_data = node_data_[node_num];
+        try {
+            congzhi::Numa::BindThreadToNumaNode(*worker.thread.NativeHandle(), node_num);
+        } catch (...) {
+            worker.is_valid = false;
+            return;
+        }
+
+        worker.is_valid = true;
+        valid_thread_count_.fetch_add(1);
+
+        while(!worker.should_exit && running_) {                std::function<void()> task;
+            worker.is_idle = true;
+            worker.idle_time_start = std::chrono::steady_clock::now();
+            {
+                congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+                node_data.cond_var.Wait(node_data.queue_mutex, [&]() {
+                    return !node_data.tasks.empty() || worker.should_exit || !running_;
+                })
+            }
+            if (worker.should_exit || !running_) {
+                break;
+            }
+            worker.is_idle = false;
+            {
+                congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+                if (!node_data.tasks.empty()) {
+                    task = std::move(node_data.tasks.front());
+                    node_data.tasks.pop();
+                }
+            }
+            if (task) {
+                task();
+            }
+        }
+        worker.is_valid = false;
+        worker.is_idle = false;
+        valid_thread_count_.fetch_sub(1);
+    }
+
+    
+    void ExpandThreadsOnNode(int node_num) {
+        if (node_num < 0 || node_num >= numa_node_count_) {
+            return;
+        }
+        auto& node_data = node_data_[node_num];
+        if (node_data.thread_count.load() >= max_threads_per_node_) {
+            return;
+        }
+        auto threads_target_count = (
+            ((node_data.thread_count.load() * expand_factor_) < max_threads_per_node_) 
+            ? (node_data.thread_count.load() * expand_factor_) : (max_threads_per_node_)
+        );
+        auto threads_need_count = threads_target_count - node_data.thread_count.load();
+        if (threads_need_count <= 0) {
+            return;
+        }
+
+        for (auto i = 0; i < threads_need_count; ++i) {
+            auto new_worker = std::make_unique<Worker>();
+            new_worker->numa_node = node_num;
+            new_worker->should_exit = false;
+
+            size_t index = workers_.size();
+            new_worker->thread.Start([this, index]() {
+                WorkerLoop(index);
+            });
+
+            congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+            workers_.push_back(std::move(new_worker));
+            node_data.thread_count.fetch_add(1);
+        }
+    }
+
+    void ShrinkThreadsOnNode(int node_num) {
+        if (node_num < 0 || node_num >= numa_node_count_) {
+            return;
+        }
+
+        auto& node_data = node_data_[node_num];
+
+        if (node_data.thread_count.load() <= min_threads_per_node_) {
+            return;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        size_t thread_need_remove = node_data.thread_count.load() - min_threads_per_node_;
+        if (thread_need_remove <= 0) {
+            return;
+        }
+        size_t thread_removed = 0;
+        congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+        for (auto& worker_ptr : workers_) {
+            if (thread_removed >= thread_need_remove) {
+                break;
+            }
+            if (worker_ptr && worker_ptr->is_valid && worker_ptr->is_idle && worker_ptr->numa_node == node_num) {
+                auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - worker_ptr->idle_time_start
+                );
+                if (idle_time > idle_threshold_) {
+                    worker_ptr->should_exit = true;
+                    thread_removed++;
+                }
+            }
+        }
+        node_data.cond_var.NotifyAll();
+    }
+    // Monitor thread run loop
+    void MonitorLoop() {
+        while (monitoring_) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (running_) {
+                for (int node_num = 0; node_num < numa_node_count_; ++node_num) {
+                    auto& node_data = node_data_[node_num];
+                    congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+                    if (node_data.tasks.size() > node_data.thread_count.load() * expand_factor_) {
+                        ExpandThreadsOnNode(node_num);
+                    } else {
+                        ShrinkThreadsOnNode(node_num);
+                    }
+                }
+            }
+        }
+    }
+public:
+    NumaThreadPool() {
+        if (!congzhi::Numa::IsNumaSupported()) {
+            throw std::runtime_error("NUMA is not supported on this system.");
+        }
+        node_data_.resize(numa_node_count_);
+    }
+    ~NumaThreadPool() override {
+        if(running_) {
+            Stop();
+        }
+    }
+    NumaThreadPool(const NumaThreadPool&) = delete;
+    NumaThreadPool& operator=(const NumaThreadPool&) = delete;
+    NumaThreadPool(NumaThreadPool&&) = delete;
+    NumaThreadPool& operator=(NumaThreadPool&&) = delete;
+
+    // Start the NUMA-aware thread pool
+    void Start() override {
         if (running_) {
             throw std::runtime_error("Thread pool is already running");
         }
-        // Implementation for starting the NUMA-aware thread pool.
+        running_ = true;
+        // Init minimum threads for each NUMA node
+        for (int node_num; node_num < numa_node_count_; ++node_num) {
+            for (size_t i = 0; i < min_threads_per_node_; ++i) {
+                auto new_worker = std::make_unique<Worker>();
+                new_worker->numa_node = node_num;
+                new_worker->should_exit = false;
+
+                size_t index = workers_.size();
+                new_worker->thread.Start([this, index]() {
+                    WorkerLoop(index);
+                });
+                congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+                workers_.push_back(std::move(new_worker));
+                auto& node_data = node_data_[node_num];
+                node_data.thread_count.fetch_add(1);
+            }
+        }
+        monitoring_ = true;
+        monitor_thread_ = std::make_unique<congzhi::Thread>();
+        monitor_thread_->Start([this]() {
+            MonitorLoop();
+        });
     }
 
+    // Stop the NUMA-aware thread pool
     void Stop() override {
-        if (!IsNumaSupported()) {
-            throw std::runtime_error("NUMA is not supported on this system");
+        if (!running_) {
+            throw std::runtime_error("Thread pool is not running");
+        }
+        
+        monitoring_ = false;
+        if (monitor_thread_ && monitor_thread_->Joinable()) {
+            monitor_thread_->Join();
+            monitor_thread_.reset();
+        }
+
+        running_ = false;
+        for(auto& node_data : node_data_) {
+            node_data.cond_var.NotifyAll();
+        }
+
+        congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+        for (auto& worker_ptr : workers_) {
+            if (worker_ptr && worker_ptr->is_valid && worker_ptr->thread.Joinable()) {
+                worker_ptr->thread.Join();
+            }
+        }
+
+        workers_.clear();
+        valid_thread_count_ = 0;
+
+        for (auto& node_data : node_data_) {
+            congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+            while (!node_data.tasks.empty()) {
+                node_data.tasks.pop();
+            }
+        }
+    }
+
+    // Enqueue a task to the NUMA node associated with the current thread.
+    void Enqueue(std::function<void()> task) override {
+        if (!running_) {
+            throw std::runtime_error("Thread pool is not running");
+        }
+        int node_num = congzhi::Numa::GetNodeCurrentThreadIsOn();
+        if (node_num < 0 || node_num >= numa_node_count_) {
+            node_num = 0; // Fallback to node 0 if current thread's node is invalid.
+        }
+        auto& node_data = node_data_[node_num];
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+            node_data.tasks.emplace(std::move(task));
+        }
+        node_data.cond_var.NotifyOne();
+    }
+
+    // Enqueue a task to a specific NUMA node 
+    void EnqueueToNumaNode(int node_num, std::function<void()> task) {
+        if (node_num < 0 || node_num >= numa_node_count_) {
+            throw std::out_of_range("Invalid NUMA node index");
         }
         if (!running_) {
             throw std::runtime_error("Thread pool is not running");
         }
-        // Implementation for stopping the NUMA-aware thread pool.
+        auto& node_data = node_data_[node_num];
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+            node_data.tasks.emplace(std::move(task));
+        }
+        node_data.cond_var.NotifyOne(); // Notify one worker thread to wake up and process the task.
     }
-
-    void Enqueue(std::function<void()> task) override {
-        // Implementation for enqueuing tasks in the NUMA-aware thread pool.
-    }
-
+    // Check if the NUMA-aware thread pool is running.    
     bool IsRunning() const override {
-        // Implementation to check if the NUMA-aware thread pool is running.
-        return false; // Placeholder
+        return running_.load();
     }
 
+    // Get the number of worker threads in the NUMA-aware thread pool.    
     size_t WorkerCount() const override {
-        // Implementation to get the number of worker threads in the NUMA-aware thread pool.
-        return 0; // Placeholder
+        return valid_thread_count_.load();
     }
-    ~NumaThreadPool() override {
-        // Cleanup resources if necessary.
+
+    // Get the number of worker threads on a specific NUMA node.
+    size_t WorkerCountOnNumaNode(int node_num) const {
+        if (node_num < 0 || node_num >= numa_node_count_) {
+            throw std::out_of_range("Invalid NUMA node index");
+        }
+        congzhi::LockGuard<congzhi::Mutex> lock(node_data_[node_num].queue_mutex);
+        auto& node_data = node_data_[node_num];
+        return node_data.thread_count.load();
+    }
+
+    // Get the number of tasks in the NUMA-aware thread pool.
+    size_t TaskCount() const override {
+        size_t total_tasks = 0;
+        for (const auto& node_data : node_data_) {
+            congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+            total_tasks += node_data.tasks.size();
+        }
+        return total_tasks;
     }
 };
 #endif
