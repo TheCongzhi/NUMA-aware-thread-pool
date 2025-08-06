@@ -66,6 +66,49 @@ public:
         return numa_max_node() + 1;
     }
 
+    
+    static int GetTotalCpuCount() {
+        return numa_num_configured_cpus();
+    }
+
+    /**
+     * @brief Gets the CPU count of a specific NUMA node.
+     * @param node The NUMA node index.
+     * @return Returns the number of CPUs on the specified NUMA node.
+     * @throws std::out_of_range if the node index is invalid. 
+     * @throws std::runtime_error if CPU mask allocation or retrieval fails.
+     */
+    static int GetCpuCountOnNode(int node) {
+    if (node < 0 || node >= NumaNodeCount()) {
+        throw std::out_of_range("Invalid NUMA node index");
+    }
+    
+    struct bitmask* cpumask = numa_allocate_cpumask();
+    if (!cpumask) {
+        throw std::runtime_error("Failed to allocate CPU mask");
+    }
+    
+    if (numa_node_to_cpus(node, cpumask) != 0) {
+        numa_free_cpumask(cpumask);
+        throw std::runtime_error("Failed to get CPUs for NUMA node");
+    }
+    
+    int cpu_count = numa_bitmask_weight(cpumask);
+    
+    numa_free_cpumask(cpumask);
+    return cpu_count;
+    }
+
+    /**
+     * @brief Binds the current thread to a specific NUMA node.
+     * @param node The NUMA node index to bind the current thread to.
+     * @throws std::out_of_range if the node index is invalid.
+     * @throws std::runtime_error if CPU affinity setting fails.
+     */
+    static void BindCurrentThreadToNumaNode(int node) {
+        BindThreadToNumaNode(pthread_self(), node);
+    }
+
     /**
      * @brief Binds a specific thread to a given NUMA node.
      * @param thread The pthread_t handle of the thread to bind.
@@ -77,22 +120,22 @@ public:
         if (node < 0 || node >= NumaNodeCount()) {
             throw std::out_of_range("Invalid NUMA node index");
         }
+
+        // Get the CPU mask associated with the specified NUMA node
         struct bitmask* nodemask = numa_allocate_nodemask();
         if (numa_node_to_cpus(node, nodemask) != 0) {
             numa_free_nodemask(nodemask);
             throw std::runtime_error("Failed to get CPUs for NUMA node");
         }
+
+        // Set the CPU affinity for the thread to the CPUs in the nodemask
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        int cpu = -1;
-        while ((cpu = numa_bitmask_next(nodemask, cpu)) >= 0) {
-            CPU_SET(cpu, &cpuset);
+        for (int i = 0; i < nodemask->size; ++i) {
+            if (numa_bitmask_isbitset(nodemask, i)) {
+                CPU_SET(i, &cpuset);
+            }
         }
-        // for (int i = 0; i < nodemask->size; ++i) {
-        //     if (numa_bitmask_isbitset(nodemask, i)) {
-        //         CPU_SET(i, &cpuset);
-        //     }
-        // }
         int res = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
         numa_free_nodemask(nodemask);
         
@@ -168,6 +211,43 @@ public:
         if (ptr) {
             numa_free(ptr, size);
         }
+    }
+    /**
+     * @brief Gets the total memory size available on a specific NUMA node.
+     * @param node The NUMA node index.
+     * @return The total memory size of specific NUMA node in bytes.
+     * @throws std::out_of_range if the node index is invalid.
+     * @throws std::runtime_error if memory size retrieval fails.
+     */
+    static long long GetNodeMemorySize(int node) {
+        if (node < 0 || node >= NumaNodeCount()) {
+            throw std::out_of_range("Invalid NUMA node index");
+        }
+        long long total_size = numa_node_size64(node, nullptr);
+        if (total_size < 0) {
+            throw std::runtime_error("Failed to get memory size for NUMA node");
+        }
+        return total_size;
+    }
+
+    /**
+     * @brief Gets the free memory size available on a specific NUMA node.
+     * @param node The NUMA node index.
+     * @return The free memory size of specific NUMA node in bytes.
+     * @throws std::out_of_range if the node index is invalid.
+     * @throws std::runtime_error if memory size retrieval fails.
+     */
+    static long long GetFreeNodeMemory(int node) {
+        if (node < 0 || node >= NumaNodeCount()) {
+            throw std::out_of_range("Invalid NUMA node index");
+        }
+        long long total_size = 0;
+        long long free_size = 0;
+        total_size = numa_node_size64(node, &free_size);
+        if (free_size < 0) {
+            throw std::runtime_error("Failed to get free memory size for NUMA node");
+        }
+        return free_size;
     }
 };
 } // namespace congzhi
