@@ -39,11 +39,38 @@ namespace congzhi {
 
 // congzhi::ThreadPool, interface for different thread pool implementations.
 
+
+/**
+ * @brief Abstract base class for a thread pool. Thus the class is not intended to be instantiated directly.
+ * The class only provides a common interface for thread pool implementations.
+ */
 class ThreadPool {
 public:
+    /**
+     * @brief Interface for starting the thread pool.
+     */
     virtual void Start() = 0;
+    
+    /**
+     * @brief Interface for stopping the thread pool.
+     */
     virtual void Stop() = 0;
+    
+    /**
+     * @brief Enqueues a task to be executed by the thread pool.
+     * @param task A callable object representing the task to be executed.
+     */
     virtual void Enqueue(std::function<void()> task) = 0;
+    
+    /**
+     * @brief Submits a task to the thread pool and returns a future for the result.
+     * @tparam F The type of the callable object.
+     * @tparam Args The types of the arguments to be passed to the callable object.
+     * @param f The callable object to be executed.
+     * @param args The arguments to be passed to the callable object.
+     * @return A std::future that will hold the result of the callable object.
+     * @note Calling std::future::get() blocks until the asynchronous result is ready.
+     */
     template<typename F, typename... Args>
     auto Submit(F&& f, Args&&... args)
         -> std::future<std::invoke_result_t<F, Args...>> {
@@ -64,33 +91,51 @@ public:
     virtual ~ThreadPool() = default;
 };
 
+/**
+ * @brief A normal thread pool implementation based on congzhi::Thread.
+ * 
+ * This thread pool manages a number of worker threads that can execute tasks concurrently.
+ */
 class NormalThreadPool : public ThreadPool {
 private:
+
+    /**
+     * @brief Worker structure representing a thread in the pool.
+     * 
+     * Each worker has its own thread, state flags, and idle time tracking.
+     */
     struct Worker {
-        congzhi::Thread thread;
-        std::atomic<bool> is_valid{false};
-        std::atomic<bool> should_exit{false};
-        std::atomic<bool> is_idle{false};
-        std::chrono::steady_clock::time_point idle_time_start;
+        congzhi::Thread thread; /// The thread object representing the worker.
+        std::atomic<bool> is_valid{false}; /// Indicates if the worker is currently valid.
+        std::atomic<bool> should_exit{false}; /// Indicates if the worker should exit.
+        std::atomic<bool> is_idle{false}; /// Indicates if the worker is currently idle.
+        std::chrono::steady_clock::time_point idle_time_start; /// The time when the worker became idle.
     };
-    mutable congzhi::Mutex worker_mutex_; // M&M rule
+    mutable congzhi::Mutex worker_mutex_; /// Mutex to protect access to the worker vector. Applied M&M rule.
 
-    const size_t min_threads_{congzhi::Thread::HardwareConcurrency()};
-    const size_t max_threads_{congzhi::Thread::HardwareConcurrency() * 2};
-    const size_t expand_factor_{2};
-    const std::chrono::seconds idle_threshold_{10}; // For threads pool expansion and contraction.
+    const size_t min_threads_{congzhi::Thread::HardwareConcurrency()}; /// Minimum number of threads in the pool, set to the number of hardware threads available.
+    const size_t max_threads_{congzhi::Thread::HardwareConcurrency() * 2}; /// Maximum number of threads in the pool, set to twice the number of hardware threads available.
+    const size_t expand_factor_{2}; /// Factor by which the thread pool expands when more threads are needed.
+    const std::chrono::seconds idle_threshold_{10}; /// Threshold for considering a thread idle, set to 10 seconds.
     
-    std::vector<std::unique_ptr<Worker>> workers_;
-    std::atomic<size_t> valid_thread_count_{0};
-    std::queue<std::function<void()>> tasks_;
-    std::atomic<bool> running_{false};
-    mutable congzhi::Mutex global_mutex_;
-    congzhi::ConditionVariable cond_var_;
+    std::vector<std::unique_ptr<Worker>> workers_; /// Vector of worker threads in the pool.
+    std::atomic<size_t> valid_thread_count_{0}; /// Number of currently valid worker threads in the pool.
+    std::queue<std::function<void()>> tasks_; /// Queue of tasks to be executed by the worker threads.
+    std::atomic<bool> running_{false}; /// Indicates if the thread pool is currently running.
+    mutable congzhi::Mutex global_mutex_; /// Mutex to protect access to the task queue and other shared resources. Applied M&M rule.
+    congzhi::ConditionVariable cond_var_; /// Condition variable for synchronizing access to the task queue.
 
-    // Monitoring thread for idle threads.
-    std::unique_ptr<congzhi::Thread> monitor_thread_;
-    std::atomic<bool> monitoring_{false};
+    
+    std::unique_ptr<congzhi::Thread> monitor_thread_; /// Thread for monitoring the pool and managing thread expansion/shrinking.
+    std::atomic<bool> monitoring_{false}; /// Indicates if the monitoring thread is currently running.
 
+    /**
+     * @brief Worker loop function that runs in each worker thread.
+     * 
+     * This function continuously checks for tasks to execute and manages the worker's state.
+     * 
+     * @param worker_index The index of the worker in the workers_ vector.
+     */
     void WorkerLoop(size_t worker_index) {
         {
             congzhi::LockGuard<congzhi::Mutex> lock(worker_mutex_);
@@ -130,7 +175,13 @@ private:
         valid_thread_count_.fetch_sub(1);
     }
 
-    // Expansion logic.
+    /**
+     * @brief Expands the number of worker threads in the pool if needed.
+     * 
+     * This function checks the current number of valid threads and creates new threads based on the expand factor.
+     * If the current valid thread count is less than the maximum allowed threads, it will create new worker threads
+     * until the target count is reached or the maximum thread limit is hit.
+     */
     void ExpandThreads() {
         auto current_valid = valid_thread_count_.load();
         if (current_valid >= max_threads_) {
@@ -164,6 +215,13 @@ private:
             ++create_thread_count;
         }
     }
+
+    /**
+     * @brief Shrinks the number of worker threads in the pool if they are idle for too long.
+     * 
+     * This function checks each worker thread and marks it for exit if it has been idle
+     * for longer than the specified idle threshold.
+     */
     void ShrinkThreads() {
         auto current_valid = valid_thread_count_.load();
         if (current_valid <= min_threads_) {
@@ -189,6 +247,13 @@ private:
         }
         cond_var_.NotifyAll(); 
     }
+
+    /**
+     * @brief Monitoring loop that runs in a separate thread to manage thread expansion and shrinking.
+     * 
+     * This function periodically checks the state of the worker threads and calls ExpandThreads or ShrinkThreads
+     * as needed based on the current task queue size and worker idle states.
+     */
     void MonitorLoop() {
         while(monitoring_) {
             std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -200,19 +265,51 @@ private:
         }
     }
 public:
-    NormalThreadPool() { workers_.reserve(min_threads_); }
-    ~NormalThreadPool() override { 
+    /**
+     * @brief Constructs a NormalThreadPool with a minimum number of threads.
+     * 
+     * Initializes the worker vector with the minimum number of threads.
+     */
+    NormalThreadPool() { workers_.reserve{min_threads_}; }
+    
+    /**
+     * @brief Destructor for NormalThreadPool.
+     * 
+     * Stops the thread pool if it is running and cleans up resources.
+     */
+    virtual ~NormalThreadPool() override { 
         if (running_) {
             Stop();
         } 
     }
-    // Copying and moving are not allowed.
+    
+    /**
+     * @brief Copy constructor is deleted to prevent copying of the thread pool.
+     */
     NormalThreadPool(const NormalThreadPool&) = delete;
+
+    /**
+     * @brief Copy assignment operator is deleted to prevent copying of the thread pool.
+     */
     NormalThreadPool& operator=(const NormalThreadPool&) = delete; 
+
+    /**
+     * @brief Move constructor is deleted to prevent moving of the thread pool.
+     */
     NormalThreadPool(NormalThreadPool&&) = delete;
+
+    /**
+     * @brief Move assignment operator is deleted to prevent moving of the thread pool.
+     */
     NormalThreadPool& operator=(NormalThreadPool&&) = delete;
 
-    void Start() override {
+    /**
+     * @brief Starts the thread pool by creating the initial worker threads.
+     * This function initializes the worker threads and starts the monitoring thread.
+     * @throws std::runtime_error if the thread pool is already running.
+     * @note This function must be called before any tasks can be enqueued.
+     */
+    virtual Start() override {
         if (running_) {
             throw std::runtime_error("Thread pool is already running");
         }
@@ -233,7 +330,14 @@ public:
         });
     }
 
-    void Stop() override {
+    /**
+     * @brief Stops the thread pool and cleans up resources.
+     * 
+     * This function stops the monitoring thread, marks all worker threads for exit,
+     * and waits for them to finish before clearing the worker vector and task queue.
+     * @throws std::runtime_error if the thread pool is not running.
+     */
+    virtual void Stop() override {
         if (!running_) {
             throw std::runtime_error("Thread pool is not running");
         }
@@ -257,7 +361,17 @@ public:
         tasks_ = std::queue<std::function<void()>>(); // Clear remaining tasks
     }
 
-    void Enqueue(std::function<void()> task) override {
+    /**
+     * @brief Enqueues a task to be executed by the thread pool.
+     * 
+     * This function adds a task to the task queue and notifies one worker thread to wake up and process the task.
+     * If the number of tasks exceeds the current valid thread count multiplied by the expand factor,
+     * it will call ExpandThreads to create more worker threads if needed.
+     * 
+     * @param task A callable object representing the task to be executed.
+     * @throws std::runtime_error if the thread pool is not running.
+     */
+    virtual void Enqueue(std::function<void()> task) override {
         if (!running_) {
             throw std::runtime_error("Thread pool is not running");
         }
@@ -274,14 +388,31 @@ public:
         }
     }
 
-    bool IsRunning() const override {
+    /**
+     * @brief Checks if the thread pool is currently running.
+     * 
+     * @return true if the thread pool is running, false otherwise.
+     */
+    virtual bool IsRunning() const override {
         return running_.load();
     }
 
-    size_t WorkerCount() const override {
+    /**
+     * @brief Returns the number of valid worker threads in the pool.
+     * 
+     * @return The number of valid worker threads.
+     */
+    virtual size_t WorkerCount() const override {
         return valid_thread_count_.load();
     }
-    size_t TaskCount() const override {
+
+    /**
+     * @brief Returns the number of tasks currently in the task queue.
+     * 
+     * @return The number of tasks in the queue.
+     */
+
+    virtual size_t TaskCount() const override {
         congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
         return tasks_.size();
     }
