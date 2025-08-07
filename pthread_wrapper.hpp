@@ -56,14 +56,14 @@ public:
      */
     explicit Mutex(MutexType type = MutexType::Default) {
         pthread_mutexattr_t attr;
-        const int res = pthread_mutexattr_init(&attr);
+        int res = pthread_mutexattr_init(&attr);
         if (res != 0) {
             throw std::runtime_error("pthread_mutex_init failed: " + std::string(strerror(res)));
         }
 
         int mutex_type = (type == MutexType::Recursive) ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_DEFAULT;
         res = pthread_mutexattr_settype(&attr, mutex_type);
-        const int res = pthread_mutex_init(&mutex_handle_, &attr);
+        res = pthread_mutex_init(&mutex_handle_, &attr);
         if (res != 0) {
             pthread_mutexattr_destroy(&attr);
             throw std::runtime_error("pthread_mutex_init with types failed: " + std::string(strerror(res)));

@@ -22,6 +22,7 @@
 #include "numa_wrapper.hpp"
 #endif
 
+#include <iostream>
 #include <vector>
 #include <queue>
 #include <unordered_map>
@@ -46,6 +47,11 @@ namespace congzhi {
  */
 class ThreadPool {
 public:
+    /**
+     * @brief Interface for printing thread pool information.
+     */
+    virtual void Info() const = 0;
+
     /**
      * @brief Interface for starting the thread pool.
      */
@@ -270,7 +276,7 @@ public:
      * 
      * Initializes the worker vector with the minimum number of threads.
      */
-    NormalThreadPool() { workers_.reserve{min_threads_}; }
+    NormalThreadPool() { workers_.reserve(min_threads_); }
     
     /**
      * @brief Destructor for NormalThreadPool.
@@ -304,12 +310,33 @@ public:
     NormalThreadPool& operator=(NormalThreadPool&&) = delete;
 
     /**
+     * @brief Prints information about the thread pool.
+     * 
+     * This function outputs the current state of the thread pool, including the number of worker threads,
+     * the number of tasks in the queue, and whether the pool is running.
+     */
+    virtual void Info() const override {
+        std::cout << "=== NormalThreadPool Info ===" << "\n";
+        std::cout << "Min threads: " << min_threads_ << "\n";
+        std::cout << "Max threads: " << max_threads_ << "\n";
+        std::cout << "Expand factor: " << expand_factor_ << "\n";
+        std::cout << "Idle threshold (seconds): " << idle_threshold_.count() << "\n";
+        std::cout << "Current valid threads: " << valid_thread_count_.load() << "\n";
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
+            std::cout << "Current tasks in queue: " << tasks_.size() << "\n";
+        }
+        std::cout << "Is running: " << (running_ ? "Yes" : "No") << "\n";
+        std::cout << "=============================" << "\n\n";
+    }
+
+    /**
      * @brief Starts the thread pool by creating the initial worker threads.
      * This function initializes the worker threads and starts the monitoring thread.
      * @throws std::runtime_error if the thread pool is already running.
      * @note This function must be called before any tasks can be enqueued.
      */
-    virtual Start() override {
+    virtual void Start() override {
         if (running_) {
             throw std::runtime_error("Thread pool is already running");
         }
@@ -610,6 +637,28 @@ public:
     NumaThreadPool& operator=(const NumaThreadPool&) = delete;
     NumaThreadPool(NumaThreadPool&&) = delete;
     NumaThreadPool& operator=(NumaThreadPool&&) = delete;
+
+
+    // Print NUMA-aware thread pool information
+    virtual void Info() const override {
+        std::cout << "=== NumaThreadPool Info ===" << std::endl;
+        std::cout << "NUMA node count: " << numa_node_count_ << std::endl;
+        std::cout << "Min threads per node: " << min_threads_per_node_ << std::endl;
+        std::cout << "Max threads per node: " << max_threads_per_node_ << std::endl;
+        std::cout << "Expand factor: " << expand_factor_ << std::endl;
+        std::cout << "Idle threshold (seconds): " << idle_threshold_.count() << std::endl;
+        std::cout << "Current valid threads: " << valid_thread_count_.load() << std::endl;
+        for (int node_num = 0; node_num < numa_node_count_; ++node_num) {
+            auto& node_data = node_data_[node_num];
+            congzhi::LockGuard<congzhi::Mutex> lock(node_data.queue_mutex);
+            std::cout << "  Node " << node_num 
+                      << ": Threads = " << node_data.thread_count.load() 
+                      << ", Tasks in queue = " << node_data.tasks.size() 
+                      << std::endl;
+        }
+        std::cout << "Is running: " << (running_ ? "Yes" : "No") << std::endl;
+        std::cout << "===========================" << std::endl;
+    }
 
     // Start the NUMA-aware thread pool
     void Start() override {
