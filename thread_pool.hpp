@@ -140,7 +140,7 @@ private:
     std::queue<std::function<void()>> tasks_; /// Queue of tasks to be executed by the worker threads.
     std::atomic<bool> running_{false}; /// Indicates if the thread pool is currently running.
     mutable congzhi::Mutex global_mutex_; /// Mutex to protect access to the global task queue. Applied M&M rule.
-    congzhi::ConditionVariable global_cond; /// Condition variable for synchronizing access to the global task queue.
+    congzhi::ConditionVariable global_cond_; /// Condition variable for synchronizing access to the global task queue.
 
     std::unique_ptr<congzhi::Thread> monitor_thread_; /// Thread for monitoring the pool and managing thread expansion/shrinking.
     std::atomic<bool> monitoring_{false}; /// Indicates if the monitoring thread is currently running.
@@ -173,7 +173,7 @@ private:
             worker->idle_time_start = std::chrono::steady_clock::now();
             {
                 congzhi::LockGuard<congzhi::Mutex> lock(global_mutex_);
-                global_cond.Wait(global_mutex_, [this, &worker]() {
+                global_cond_.Wait(global_mutex_, [this, &worker]() {
                     return !tasks_.empty() || worker->should_exit || !running_;
                 });
             }
@@ -286,7 +286,7 @@ private:
                 }
             }
         }
-        global_cond.NotifyAll(); 
+        global_cond_.NotifyAll(); 
     }
 
     /**
@@ -372,7 +372,7 @@ public:
         std::cout << "Expand factor: \t" << expand_factor_ << "\n";
         std::cout << "Expand threshold: \t" << expand_threshold_ << "\n";
         std::cout << "Idle threshold (seconds): \t" << idle_threshold_.count() << "\n";
-        std::cout << "Current check interval (seconds): \t" << current_check_interval_.count() << "\n";
+        std::cout << "Current check interval (seconds): \t" << monitor_interval_.count() << "\n";
         std::cout << "Current valid threads: \t" << valid_thread_count_.load() << "\n";
         std::cout << "Current tasks in queue: \t" << tasks_.size() << "\n";
         std::cout << "Is running: \t" << (running_ ? "Yes" : "No") << "\n";
@@ -417,14 +417,14 @@ public:
      * @param timeout The maximum timeout for ShutdownPolicy::WaitForTimeout.
      * @throws std::runtime_error if the thread pool is not running.
      */
-    virtual void Stop(ShutdownPolicy policy = ShutdownPolicy::WaitForAll
+    virtual void Stop(ShutdownPolicy policy = ShutdownPolicy::WaitForAll,
                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) override {
         if (!running_) {
             throw std::runtime_error("Thread pool is not running");
         }
 
         monitoring_ = false;
-        monitor_cond_.NotifyOne() // Stop the monitoring thread
+        monitor_cond_.NotifyOne(); // Stop the monitoring thread
 
         if (monitor_thread_ && monitor_thread_->Joinable()) {
             monitor_thread_->Join();
@@ -432,7 +432,7 @@ public:
         }
 
         running_ = false;
-        global_cond.NotifyAll(); // Notify all threads to wake up and exit.
+        global_cond_.NotifyAll(); // Notify all threads to wake up and exit.
 
         switch (policy) {
             case ShutdownPolicy::WaitForAll: {
@@ -492,7 +492,7 @@ public:
             tasks_.emplace(std::move(task));
         }
 
-        global_cond.NotifyOne(); // Notify one worker thread to wake up and process the task.
+        global_cond_.NotifyOne(); // Notify one worker thread to wake up and process the task.
         
         auto task_count = tasks_.size();
         auto current_thread = valid_thread_count_.load();
@@ -891,7 +891,7 @@ public:
      * @throws std::runtime_error if the thread pool is not running.
      */
     virtual void Stop(ShutdownPolicy policy = ShutdownPolicy::WaitForAll,
-                      std::chrono::miilliseconds timeout = std::chrono::milliseconds(5000)) override {
+                      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) override {
         if (!running_) {
             throw std::runtime_error("Thread pool is not running");
         }
@@ -990,15 +990,15 @@ public:
             congzhi::LockGuard<congzhi::Mutex> lock(node_data.tasks_mutex);
             node_data.tasks.emplace(std::move(task));
         }
-        node_data.tasks_var.NotifyOne(); // Notify one worker thread to wake up and process the task.
+        node_data.tasks_cond.NotifyOne(); // Notify one worker thread to wake up and process the task.
     }
     // Check if the NUMA-aware thread pool is running.    
-    bool IsRunning() const override {
+    virtual bool IsRunning() const override {
         return running_.load();
     }
 
     // Get the number of worker threads in the NUMA-aware thread pool.    
-    size_t WorkerCount() const override {
+    virtual size_t WorkerCount() const override {
         return valid_thread_count_.load();
     }
 
@@ -1013,7 +1013,7 @@ public:
     }
 
     // Get the number of tasks in the NUMA-aware thread pool.
-    size_t TaskCount() const override {
+    virtual size_t TaskCount() const override {
         size_t total_tasks = 0;
         for (const auto& node_data : node_data_) {
             congzhi::LockGuard<congzhi::Mutex> lock(node_data.tasks_mutex);
