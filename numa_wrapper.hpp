@@ -28,6 +28,7 @@ namespace congzhi {
  * or interleaved across multiple nodes.
  *
  * This class is non-instantiable by design.
+ * @note Requires the libnuma library to be installed on the system. Use -lnuma during compilation.
  */
 class Numa {
 private:
@@ -122,10 +123,10 @@ public:
         }
 
         // Get the CPU mask associated with the specified NUMA node
-        struct bitmask* nodemask = numa_allocate_nodemask();
-        if (numa_node_to_cpus(node, nodemask) != 0) {
-            numa_free_nodemask(nodemask);
-            throw std::runtime_error("Failed to get CPUs for NUMA node");
+        struct bitmask* cpumask = numa_allocate_cpumask();
+        if (numa_node_to_cpus(node, cpumask) != 0) {
+            numa_free_nodemask(cpumask);
+            throw std::runtime_error("Failed to get CPUs for NUMA node" + std::to_string(node));
         }
 
         // Set the CPU affinity for the thread to the CPUs in the nodemask
@@ -241,9 +242,9 @@ public:
         if (node < 0 || node >= NumaNodeCount()) {
             throw std::out_of_range("Invalid NUMA node index");
         }
-        long long total_size = 0;
+        // long long total_size = 0;
         long long free_size = 0;
-        total_size = numa_node_size64(node, &free_size);
+        numa_node_size64(node, &free_size);
         if (free_size < 0) {
             throw std::runtime_error("Failed to get free memory size for NUMA node");
         }

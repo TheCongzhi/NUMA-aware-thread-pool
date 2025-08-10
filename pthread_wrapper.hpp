@@ -56,15 +56,15 @@ public:
      */
     explicit Mutex(MutexType type = MutexType::Default) {
         pthread_mutexattr_t attr;
-        int res = pthread_mutexattr_init(&attr);
+        const int res = pthread_mutexattr_init(&attr);
         if (res != 0) {
             throw std::runtime_error("pthread_mutex_init failed: " + std::string(strerror(res)));
         }
 
         int mutex_type = (type == MutexType::Recursive) ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_DEFAULT;
-        res = pthread_mutexattr_settype(&attr, mutex_type);
-        res = pthread_mutex_init(&mutex_handle_, &attr);
-        if (res != 0) {
+        const int res2 = pthread_mutexattr_settype(&attr, mutex_type);
+        const int res3 = pthread_mutex_init(&mutex_handle_, &attr);
+        if (res2 != 0 || res3 != 0) {
             pthread_mutexattr_destroy(&attr);
             throw std::runtime_error("pthread_mutex_init with types failed: " + std::string(strerror(res)));
         }
@@ -78,13 +78,13 @@ public:
         pthread_mutex_destroy(&mutex_handle_);
     }
 
-    /// Deleted copy constructor.
+    /// @brief Deleted copy constructor.
     Mutex(const Mutex&) = delete;
-    /// Deleted copy assignment operator.
+    /// @brief Deleted copy assignment operator.
     Mutex& operator=(const Mutex&) = delete;
-    /// Deleted move constructor.
+    /// @brief Deleted move constructor.
     Mutex(Mutex&&) = delete;
-    /// Deleted move assignment operator.
+    /// @brief Deleted move assignment operator.
     Mutex& operator=(Mutex&&) = delete;
     
     /**
@@ -128,6 +128,113 @@ public:
      */
     const pthread_mutex_t* NativeHandle() const noexcept {
         return &mutex_handle_;
+    }
+};
+
+/**
+ * @brief A wrapper around pthread read-write lock for shared and exclusive access.
+ *
+ * This class encapsulates a POSIX read-write lock and provides locking operations for both shared and exclusive access.
+ * Non-copyable and non-movable to ensure safe usage.
+ */
+class SharedMutex {
+private:
+    pthread_rwlock_t rwlock_handle_;
+public:
+    /**
+     * @brief Constructs and initializes the shared mutex.
+     * @throws std::runtime_error if initialization fails.
+     */
+    explicit SharedMutex() {
+        const int res = pthread_rwlock_init(&rwlock_handle_, nullptr);
+        if (res != 0) {
+            throw std::runtime_error("pthread_rwlock_init failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Destroys the shared mutex.
+     */
+    ~SharedMutex() noexcept {
+        pthread_rwlock_destroy(&rwlock_handle_);
+    }
+
+    /// @brief Deleted copy constructor. 
+    SharedMutex(const SharedMutex&) = delete;
+    /// @brief Deleted copy assignment operator.
+    SharedMutex& operator=(const SharedMutex&) = delete;
+    /// @brief Deleted move constructor.
+    SharedMutex(SharedMutex&&) = delete;
+    /// @brief Deleted move assignment operator.
+    SharedMutex& operator=(SharedMutex&&) = delete;
+
+    /**
+     * @brief Locks the mutex for exclusive access.
+     * @throws std::runtime_error if locking fails.
+     */
+    void Lock() {
+        const int res = pthread_rwlock_wrlock(&rwlock_handle_);
+        if (res != 0) {
+            throw std::runtime_error("pthread_rwlock_wrlock failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Unlocks the mutex from exclusive access.
+     */
+    void Unlock() noexcept {
+        pthread_rwlock_unlock(&rwlock_handle_);
+    }
+
+    /**
+     * @brief Attempts to lock the mutex for exclusive access without blocking.
+     * @return true if the lock was acquired, false otherwise.
+     */
+    bool TryLock() noexcept {
+        return (pthread_rwlock_trywrlock(&rwlock_handle_) == 0);
+    }
+
+    /**
+     * @brief Locks the mutex for shared access.
+     * @throws std::runtime_error if locking fails.
+     */
+    void LockShared() {
+        const int res = pthread_rwlock_rdlock(&rwlock_handle_);
+        if (res != 0) {
+            throw std::runtime_error("pthread_rwlock_rdlock failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Unlocks the mutex from shared access.
+     */
+    void UnlockShared() noexcept {
+        pthread_rwlock_unlock(&rwlock_handle_);
+    }
+
+    /**
+     * @brief Attempts to lock the mutex for shared access without blocking.
+     * @return true if the lock was acquired, false otherwise.
+     */
+    bool TryLockShared() noexcept {
+        return (pthread_rwlock_tryrdlock(&rwlock_handle_) == 0);
+    }
+
+    /**
+     * @brief Returns a non-const pointer to the native pthread rwlock handle.
+     * @return Pointer to the native pthread rwlock handle.
+     * @warning Direct manipulation of the native handle is discouraged, which may break RAII guarantees.
+     */
+    pthread_rwlock_t* NativeHandle() noexcept {
+        return &rwlock_handle_;
+    }
+
+    /**
+     * @brief Returns a const pointer to the native pthread rwlock handle.
+     * @return Const pointer to the native pthread rwlock handle.
+     */
+    const pthread_rwlock_t* NativeHandle() const noexcept {
+        return &rwlock_handle_;
     }
 };
 
@@ -391,6 +498,205 @@ public:
 };
 
 /**
+ * @brief A wrapper around pthread attributes for thread creation.
+ * This auxiliary class provides a way to set thread attributes.
+ */
+class ThreadAttribute {
+private:
+    pthread_attr_t attr_handle_;
+public:
+    
+    /**
+     * @brief Enum representing the scope of threads.
+     */
+    enum class Scope {
+        Process, // Process scope. The CPU race is happening within a single process.
+        System   // System scope. The CPU race is happening across all threads in the system.
+    };
+
+    /**
+     * @brief Enum representing the detach state of threads.
+     */
+    enum class DetachState {
+        Joinable, // Thread is joinable and can be waited on.
+        Detached   // Thread is detached and cannot be waited on.
+    };
+
+    /**
+     * @brief Enum representing the scheduling policy for threads.
+     * 
+     * Priority values for scheduling policies:
+     * - SCHED_OTHER: Default scheduling policy (0 priority).
+     * - SCHED_FIFO: Platform specific.
+     * - SCHED_RR: Platform specific.
+     */
+    enum class SchedulingPolicy {
+        Default, // Default scheduling policy (Completely Fair Scheduler for Linux and Core Foundation Scheduler for macOS).
+        FIFO,    // First In First Out scheduling policy.
+        RR // Round Robin scheduling policy.
+    };
+
+    /**
+     * @brief Constructs and initializes the thread attributes with default settings.
+     * @throws std::runtime_error if initialization fails.
+     */
+    ThreadAttribute() {
+        const int res = pthread_attr_init(&attr_handle_);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_init failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Destroys the thread attributes.
+     */
+    ~ThreadAttribute() noexcept {
+        pthread_attr_destroy(&attr_handle_);
+    }
+
+    /// Deleted copy constructor.
+    ThreadAttribute(const ThreadAttribute&) = delete;
+    /// Deleted copy assignment operator.
+    ThreadAttribute& operator=(const ThreadAttribute&) = delete;
+    /// Deleted move constructor.
+    ThreadAttribute(ThreadAttribute&&) = delete;
+    /// Deleted move assignment operator.
+    ThreadAttribute& operator=(ThreadAttribute&&) = delete;
+
+    /**
+     * @brief Sets the stack size for threads created with these attributes.
+     * @param size The stack size in bytes. 8MB in default.
+     * @throws std::runtime_error if setting stack size fails.
+     */
+    void SetStackSize(size_t size = (8 * 1024 * 1024)) {
+        const int res = pthread_attr_setstacksize(&attr_handle_, size);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_setstacksize failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Gets the stack size for threads created with these attributes.
+     * @return The stack size in bytes.
+     * @throws std::runtime_error if getting stack size fails.
+     */
+    size_t GetStackSize() const {
+        size_t size;
+        const int res = pthread_attr_getstacksize(&attr_handle_, &size);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_getstacksize failed: " + std::string(strerror(res)));
+        }
+        return size;
+    }
+
+    /**
+     * @brief Sets the scheduling policy and priority for threads created with these attributes.
+     * @param policy The scheduling policy to set (default is SchedulingPolicy::Default, which is SCHED_OTHER).
+     * @param priority The priority level (default is 0).
+     * @throws std::runtime_error if setting scheduling policy or priority fails.
+     */
+    void SetSchedulerPolicy(SchedulingPolicy policy = SchedulingPolicy::Default, int priority = 0) {
+        int policy_value;
+        switch (policy) {
+            case SchedulingPolicy::Default: {
+                policy_value = SCHED_OTHER; // Default scheduling policy
+                const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
+                if (res != 0) {
+                    throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res)));
+                }
+                if (priority != 0) {
+                    throw std::invalid_argument("Priority must be 0 for SCHED_OTHER");
+                }
+                break;
+            }
+            case SchedulingPolicy::FIFO: {
+                policy_value = SCHED_FIFO; // First In First Out scheduling policy
+                const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
+                if (res != 0) {
+                    throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res)));
+                }
+                if (priority < sched_get_priority_min(SCHED_FIFO) || 
+                    priority > sched_get_priority_max(SCHED_FIFO)) {
+                    throw std::out_of_range("Priority out of range for SCHED_FIFO");
+                }
+                struct sched_param param;
+                param.sched_priority = priority;
+                const int res2 = pthread_attr_setschedparam(&attr_handle_, &param);
+                if (res2 != 0) {
+                    throw std::runtime_error("pthread_attr_setschedparam failed: " + std::string(strerror(res2)));
+                }
+                break;
+            }
+            case SchedulingPolicy::RR: {
+                policy_value = SCHED_RR; // Round Robin scheduling policy
+                const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
+                if (res != 0) {
+                    throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res)));
+                }
+                if (priority < sched_get_priority_min(SCHED_RR) || 
+                    priority > sched_get_priority_max(SCHED_RR)) {
+                    throw std::out_of_range("Priority out of range for SCHED_RR");
+                }
+                struct sched_param param;
+                param.sched_priority = priority;
+                const int res2 = pthread_attr_setschedparam(&attr_handle_, &param);
+                if (res2 != 0) {
+                    throw std::runtime_error("pthread_attr_setschedparam failed: " + std::string(strerror(res2)));
+                }
+                break;
+            }
+            default:
+                throw std::invalid_argument("Invalid scheduling policy");
+        }
+    }
+
+    /**
+     * @brief Sets the scope of threads created with these attributes.
+     * @param scope The scope to set (Process or System).
+     * @note Process scope may not be supported on most systems.
+     * @throws std::runtime_error if setting scope fails.
+     */
+    void SetScope(Scope scope) {
+        int scope_value = (scope == Scope::Process) ? PTHREAD_SCOPE_PROCESS : PTHREAD_SCOPE_SYSTEM;
+        const int res = pthread_attr_setscope(&attr_handle_, scope_value);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_setscope failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /** 
+     * @brief Sets the detach state of threads created with these attributes.
+     * @param detached DetachState indicating whether the thread is joinable or detached (Joinable in default).
+     * @throws std::runtime_error if setting detach state fails.
+     */
+    void SetDetachState(DetachState detached = DetachState::Joinable) {
+        int detach_state = (detached == DetachState::Detached) ? PTHREAD_CREATE_DETACHED : PTHREAD_CREATE_JOINABLE;
+        const int res = pthread_attr_setdetachstate(&attr_handle_, detach_state);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_setdetachstate failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Returns a pointer to the native pthread attribute handle.
+     * @return Pointer to the native pthread attribute handle.
+     * @warning Direct manipulation of the native handle is discouraged, which may break RAII guarantees.
+     */
+    pthread_attr_t* NativeHandle() noexcept {
+        return &attr_handle_;
+    }
+
+    /**
+     * @brief Returns a const pointer to the native pthread attribute handle.
+     * @return Const pointer to the native pthread attribute handle.
+     */
+    const pthread_attr_t* NativeHandle() const noexcept {
+        return &attr_handle_;
+    }
+};
+
+
+/**
  * @brief A cross-platform wrapper around pthreads for thread management.
  *
  * Provides a high-level interface for creating, starting, managing, and synchronizing threads.
@@ -402,14 +708,14 @@ public:
      * @brief Enum representing the state of a thread.
      */
     enum class ThreadState {
-        JOINABLE,   ///< Thread is running and can be joined.
-        DETACHED,   ///< Thread is running independently.
-        FINISHED,   ///< Thread has finished execution.
-        UNCREATED   ///< Thread has not been created or is in an invalid state.
+        JOINABLE,   // Thread is running and can be joined.
+        DETACHED,   // Thread is detached, running independently.
+        FINISHED,   // Thread has finished execution.
+        UNCREATED   // Thread has not been created or is in an invalid state.
     };
     
     /**
-     * @brief Get the current thread state.
+     * @brief Get the current thread state as a string.
      * @return Returns a std::string representation of the current thread state. 
      */
     const std::string GetThreadState() noexcept {
@@ -432,9 +738,19 @@ public:
         return thread_state_ == ThreadState::JOINABLE;
     }
 
+    /**
+     * @brief Checks if the thread is detached.
+     * @return true if the thread is detached, false otherwise.
+     */
+    bool Detached() const noexcept {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        return thread_state_ == ThreadState::DETACHED;
+    }
+
+
 private:
-    pthread_t thread_handle_;       // Native thread handle.
-    ThreadState thread_state_;      // Current state of the thread.
+    pthread_t thread_handle_{0};       // Native thread handle.
+    ThreadState thread_state_{ThreadState::UNCREATED};      // Current state of the thread.
     mutable congzhi::Mutex mutex_;  // A mutable mutex for thread safety(M&M rule).
 
     /**
@@ -506,29 +822,9 @@ public:
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
-    explicit Thread(TFunc&& f, TArgs&&... args) 
-        : thread_handle_(0), thread_state_(ThreadState::UNCREATED) {
-        
-        auto bound_task =  [func = std::forward<TFunc>(f), tup = std::make_tuple(std::forward<TArgs>(args)...)]() mutable {
-                                std::apply(func, std::move(tup));
-                           };
-        
-        using task_type = decltype(bound_task);
-        auto data = new ThreadData<task_type>(std::move(bound_task));
-        
-        // Create a new thread.
-        const int res = (pthread_create(
-            &thread_handle_, 
-            nullptr, 
-            &ThreadEntry, 
-            static_cast<void*>(data)
-        ));
-        if (res != 0) {
-            delete data;
-            throw std::runtime_error("pthread_create failed: " + std::string(strerror(res)));
-        }
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        thread_state_ = ThreadState::JOINABLE;
+    explicit Thread(TFunc&& f, TArgs&&... args, 
+                    const ThreadAttribute& attr = ThreadAttribute()) {
+        Start(std::forward<TFunc>(f), std::forward<TArgs>(args)..., attr);
     }
     
     /**
@@ -583,34 +879,33 @@ public:
     }
 
     /**
-     * @brief Starts an uncreated thread with the given callable and arguments.
+     * @brief Starts the thread with the given callable and arguments.
      * @tparam TFunc Callable type.
      * @tparam TArgs Argument types.
+     * @param attr Thread attributes for creation.
      * @param f Callable object.
      * @param args Arguments to pass to the callable.
      * @throws std::logic_error if thread is already running.
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
-    void Start(TFunc&& f, TArgs&&... args) {
-        if (Joinable()) {
-            throw std::logic_error("Thread is already running");
+    void Start(TFunc&& f, TArgs&&... args, const ThreadAttribute& attr = ThreadAttribute()) {
+        if (thread_state_ != ThreadState::UNCREATED) {
+            throw std::logic_error("Thread is already started");
         }
         
-        auto bound_task = [func = std::forward<TFunc>(f), 
-                          tup = std::make_tuple(std::forward<TArgs>(args)...)]() mutable {
-            std::apply(func, std::move(tup));
-        };
+        auto bound_task = std::bind(std::forward<TFunc>(f), std::forward<TArgs>(args)...);
+        // auto bound_task = [func = std::forward<TFunc>(f), 
+        //                   tup = std::make_tuple(std::forward<TArgs>(args)...)]() mutable {
+        //     std::apply(std::move(func), std::move(tup));
+        // };
         
         using task_type = decltype(bound_task);
         auto data = new ThreadData<task_type>(std::move(bound_task));
-        if (!data) {
-            throw std::bad_alloc();
-        }
         
         const int res = pthread_create(
             &thread_handle_, 
-            nullptr, 
+            attr.NativeHandle(), 
             &ThreadEntry, 
             static_cast<void*>(data)
         );
