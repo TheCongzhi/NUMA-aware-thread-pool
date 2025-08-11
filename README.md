@@ -1,130 +1,190 @@
-# README
+# NUMA-Aware Thread Pool
 
 - [English](README.md)
 - [简体中文](README.zh_CN.md)
 
-This project implements a **thread pool** that runs on **macOS** and **Linux**. The behavior of the thread pool adapts depending on the underlying CPU hardware.
+A modern C++17 thread pool library featuring a Linux‑only NUMA‑aware pool—built to maximize memory locality and minimize cross‑node latency—plus a portable non‑NUMA pool and POSIX pthread wrappers, designed for optimal performance accross multi-core architectures on Linux and macOS. With explicit support for NUMA architectures, this implementation addresses the unique challenges for memory locality and cross-NUMA-node latency in multi CPU socket systems(NUMA systems).
 
-- **On macOS**: Since Apple Silicon uses **Unified Memory Architecture (UMA)**, the thread pool defaults to a UMA-based design.  
-  (**Note:** macOS does not support NUMA architectures by default.)
-- **On Linux**: The thread pool adjusts based on the system’s CPU architecture. If the system supports **NUMA**, task scheduling and memory access strategies are optimized accordingly.
+## Core Components
 
-What is **NUMA**? See here:
+This repository contains three main components:
 
-- [Non-Uniform Memory Architecture - Fedor Pikus CppNow](https://www.youtube.com/watch?v=f0ZKBusa4CI&t=6s)
-- [Frank Denneman's category about NUMA](https://frankdenneman.nl/category/numa/page/3/)
+1. POSIX Thread Wrapper (`pthread_wrapper.hpp`) – RAII‑style C++ wrapper for POSIX threading primitives, offering standard‑library‑like interfaces for threads, mutexes, lock guards, and condition variables while preserving the performance of low‑level pthread operations.
 
-## The POSIX Thread Wrapper
+2. NUMA Wrapper (`numa_wrapper.hpp`) – Utilities to detect NUMA topology and manage CPU/memory binding for optimal data locality (Linux‑only).
 
-This project mainly provides two `.hpp` header files: one as a simple pthread wrapper library and the other as a thread pool, which varies its behavior depending on the underlying hardware.
+3. Thread Pool (`thread_pool.hpp`) – Flexible, high‑performance pool with NUMA‑aware scheduling for Linux, and a standard mode for Linux/macOS..
 
-POSIX thread API is huge, so the wrapper encapsulates a small part of POSIX thread API using RAII, providing `congzhi::Thread`, `congzhi::Mutex`, `congzhi::LockGuard`, and `congzhi::ConditionVariable` classes. With abstructions, you don't need to worry about the resource leaks. And the provided APIs not only look but also function similar to the standard libraries (std::thread, std::mutex, std::lock_guard, std::condition_variable). Ensuring the seamless usage. For those you can find in [[pthread_wrapper.hpp]].
+### 1. POSIX Thread Wrapper (`pthread_wrapper.hpp`)
 
-### `congzhi::Mutex`
+Encapsulates POSIX threading into safe, modern C++ classes. There are some key classes in the scope:
 
-This class encapsulates a POSIX mutex type (`pthread_mutex_t`), ensuring proper management for locking and unlocking lock operations similar to `std::mutex`.
-
-#### Constructors and Destructor
-
-This class ensures RAII-style management for the POSIX mutual-exclusion lock. The constructor will initialize the mutex, and the destructor ensures it is always destroyed properly.
-
-Similar to `std::mutex`, `congzhi::Mutex` is neither copyable nor movable.
-
-#### Member Functions
-
-We have four member functions under this class:
-
-- `Lock()`: Locks the mutex. (Comparable to `std::mutex::lock()`)
-- `Unlock()`: Ensures the mutex is released. (Comparable to `std::mutex::unlock()`)
-- `TryLock()`: Attempts to acquire the mutex without blocking. (Comparable to `std::mutex::try_lock()`)
-- `NativeHandle()`: Native handle access, allows retrieval of the underlying `pthread_mutex_t` handle. (Comparable to `std::mutex::native_handle()`)
-
-### `congzhi::LockGuard`
-
-This class provides a straightforward approach to RAII-based resource management. It includes only a constructor and a destructor, ensuring automatic lock acquisition (`.Lock()` operation) and release (`.Unlock()` operation).
-
-This class is not copyable nor movable.
-
-### `congzhi::ConditionVariable`
-
-This class is a encapsulated synchronization tool used to block threads until a particular condition is met.
-
-#### Constructors and Destructor
-
-This class ensures RAII-style management for the POSIX condition variable type (`pthread_cond_t`). Neither copyable nor movable.
-
-#### Member Functions
-
-`congzhi::ConditionVariable` provides you these methods:
-
-- `Wait()`: Wait for the condition variable to be notified, using a mutex.
-- `WaitFor()`: Wait for the condition variable to be notified with a timeout.
-- `WaitUntil()`: Wait for the condition variable to be notified until a specific time point.
-- `NotifyOne()`: Notify one of any waiting thread.
-- `NotifyAll()`: Notify all waiting threads.
-
-### `congzhi::Thread`
-
-This class offers a clear alternative to `std::thread`. Similar to the standard thread library, `congzhi::Thread` also supports submitting callable objects of any type and binding them to a thread.
-
-#### Constructors and Destructor
-
-This class ensures RAII-style management for the POSIX thread. It is only movable.
-
-#### Member Functions
-
-The `congzhi::Thread` class provides several member functions exactly like what we have in `std::thread`, these are:
-
-- `GetThreadState()`: For testing usage, returns the state of a thread. We have an enumeration class of `ThreadState`.
-- `Joinable()`: To check if the thread is joinable. (Comparable to `std::thread::joinable()`)
-- `Join()`: Wait for the thread to finish execution.
-- `Detach()`: Permits the thread to run independently. After execution, the thread's resources are released automatically.
-- `Swap()`: Swap two threads.
-- `Yield()`: Yield the corrent thread.
-- `Start()`: Starts a uncreated thread with a callable object and its arguments.
-- `GetId()`: Returns the id of the thread.
-- `NativeHandle()`: Returns the underlying native thread handle.
-- `HardwareConcurrency()`: Returns the number of concurrent threads supported. (POSIX API)
-
-#### `congzhi::Thread::Start()`
-
-`congzhi::Thread` offers a feature that std::thread does not: the `congzhi::Thread::Start()` function, which allows a thread to be started without constructing a new object, this is a signaficant advantage compare to `std::thread`. As demonstrated below:
+- `congzhi::Mutex`: RAII-style lock management for pthread_mutex_t. Initializes the mutex in the constructor and destroys it in the destructor, ensuring proper cleanup even in the presence of exceptions. Provides `Lock()`, `Unlock()`, `TryLock()`, and `NativeHandle()` methods for explicit control over locking. Protecting critical sections in multithreaded applicatinos, here's an easy example:
 
 ```cpp
+// examine congzhi::Mutex
+
 #include <iostream>
 #include <thread>
-#include "pthread_wrapper.hpp"
+#include "../pthread_wrapper.hpp"
+
+void LockForSeconds(congzhi::Mutex* mutex, int seconds) {
+    mutex->Lock();
+    std::cout << "Thread " << std::this_thread::get_id() << " acquired lock for " << seconds << " seconds." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    mutex->Unlock();
+    std::cout << "Lock released after " << seconds << " seconds by thread" << std::this_thread::get_id() << std::endl;
+}
+
+void TryLocking(congzhi::Mutex* mutex) {
+    while (!mutex->TryLock()) {
+        std::cout << "Thread " << std::this_thread::get_id() << " failed to acquire lock, trying again..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    std::cout << "Thread " << std::this_thread::get_id() << " acquired the lock!" << std::endl;
+    mutex->Unlock();
+}
 
 int main() {
-
-    // This two thread class both support start a thread when construct the thread object:
-    std::thread t1([]() { std::cout << "t1 says hello!\n"; } );
-    congzhi::Thread t2([]() { std::cout << "t2 says hello!\n"; } );
+    congzhi::Mutex mutex;
+    std::cout << "Starting threads to demonstrate mutex locking..." << std::endl;
+    std::thread t1(LockForSeconds, &mutex, 3);
+    std::thread t2(TryLocking, &mutex);
 
     t1.join();
-    t2.Join();
+    t2.join();
+    std::cout << "Both threads completed." << std::endl;
 
-    // In std::thread, if you construct a default thread, you must create another thread and move it
-    // to the default-constructed thread, like this:
-    std::thread t3;
-    t3 = std::thread([]() { std::cout << "t3 says hello!\n"; }); // Move assignment
-
-    // With congzhi::Thread, you don’t need to create a temporary thread and move it. congzhi::Thread
-    // provides a Start function that allows you to start a thread directly:
-    congzhi::Thread t4;
-    t4.Start([]() { std::cout << "t4 says hello!\n"; });
-
-    t3.join();
-    t4.Join();
     return 0;
 }
 ```
 
-Run this with:
+- `congzhi::LockGuard`: Scope‑bounded `Lock`/`Unlock` helper. Locks the associated `TLock` (any types of lock) upon construction and automatically unlocks it upon destruction, ensuring exception‑safety.
 
-```bash
-g++ -pthread -std=c++17 start.cpp -o start && ./start && rm start
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+class AnyLock {
+public:
+  void Lock() {
+    std::cout << "Locked" << std::endl;
+  }
+  void Unlock() {
+    std::cout << "Unlocked" << std::endl;
+  }
+};
+
+int main() {
+  AnyLock any_lock;
+  // Using congzhi::LockGuard with AnyLock
+  congzhi::LockGuard<AnyLock> lock_guard(any_lock);
+  return 0;
+}
 ```
 
-## The NUMA Thread Pool
+- `congzhi::ConditionVariable`: : Provides wait/notify synchronization built on top of `pthread_cond_t`, enabling threads to efficiently block until a certain condition is met. The object is initialized in the constructor and destroyed in the destructor, ensuring RAII-style resource management. `Wait()`, `WaitFor()`, `WaitUntil()`, `NotifyOne()`, `NotifyAll()` methods are provided. Here's an example applying `congzhi::ConditionVariable` to complete a barrier:
 
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+#include <thread>
+#include <chrono>
+#include <vector>
+#include <atomic>
+
+// MOBA game example using Condition Variables, only when all players are ready, the game starts. (Barrier)
+std::atomic<int> ready_players = 0;
+const int k_total_players = 10;
+
+void Player(congzhi::ConditionVariable* cond_system, // system->player
+            congzhi::ConditionVariable* cond_player, // player->system
+            congzhi::Mutex* mutex) {
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100 + rand() % 500));
+    
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(*mutex);
+        ready_players++;
+        std::cout << "Player " << std::this_thread::get_id() 
+                  << " ready (" << ready_players << "/" << k_total_players << ")" << std::endl;
+    }
+    
+    cond_player->NotifyOne(); // one player notifies the system due to readiness
+    
+    congzhi::LockGuard<congzhi::Mutex> lock(*mutex); // wait for other players
+    cond_system->Wait(*mutex, [](){ 
+        return ready_players == k_total_players; 
+    });
+    
+    std::cout << "Player " << std::this_thread::get_id() << " enters game!" << std::endl;
+}
+
+void System(congzhi::ConditionVariable* cond_system, // system->player
+            congzhi::ConditionVariable* cond_player, // player->system
+            congzhi::Mutex* mutex) {
+    congzhi::LockGuard<congzhi::Mutex> lock(*mutex);
+    std::cout << "System waiting for all players..." << std::endl;
+    
+    // 
+    cond_player->Wait(*mutex, [](){ 
+        return ready_players == k_total_players; 
+    });
+    
+    std::cout << "\nAll players ready! Starting game..." << std::endl;
+    cond_system->NotifyAll();
+}
+
+int main() {
+    congzhi::Mutex mutex;
+    congzhi::ConditionVariable cond_system;  // system->player
+    congzhi::ConditionVariable cond_player;  // player->system
+
+    std::vector<std::thread> threads;
+
+    threads.emplace_back(System, &cond_system, &cond_player, &mutex);    
+    
+    for (int i = 0; i < k_total_players; ++i) {
+        threads.emplace_back(Player, &cond_system, &cond_player, &mutex);
+    }
+    
+    for (auto& t : threads) {
+        t.join();
+    }
+    
+    std::cout << "\nGame started successfully!" << std::endl;
+    return 0;
+}
+```
+
+- `congzhi::Thread`: A movable RAII thread wrapper built on top of `pthread` (POSIX threads), providing a safe and easy-to-use thread usage interface that acts like `std::thread`. Compared to `std::thread`, `congzhi::Thread` offers explicit thread state tracking via the `ThreadState enum`, integrates a dedicated `ThreadAttribute` class for declarative configuration of pthread-specific properties, and automatically detaches joinable threads in its destructor to prevent resource leaks (in a way similar to `std::jthread`). Most importantly, it provides the `congzhi::Thread::Start()` method, which allows the delayed start of a thread. I'll put several examples for you on how to use `congzhi::Thread`.
+
+```cpp
+// About the Start() method:
+
+#include <iostream>
+#include <thread>
+#include "../pthread_wrapper.hpp"
+
+int main () {
+  // Starting threads with immediate execution, both implementations support it
+  std::thread std_t1([]() {std::cout << "Thread 1 is running." << std::endl;});
+  congzhi::Thread congzhi_t1([]() {std::cout << "Congzhi Thread 1 is running." << std::endl;});
+  std_t1.join();
+  congzhi_t1.Join();
+
+  // Move construction, no delayed start, both implementations support it
+  std::thread std_t2;
+  std_t2 = std::thread([]() {std::cout << "Thread 2 is running." << std::endl;});
+  congzhi::Thread congzhi_t2;
+  congzhi_t2 = congzhi::Thread([]() {std::cout << "Congzhi Thread 2 is running." << std::endl;});
+  std_t2.join();
+  congzhi_t2.Join();
+
+  // Delayed start, no move construction needed, std::thread does not support it
+  congzhi::Thread congzhi_t3;
+  congzhi_t3.Start([]() {std::cout << "Congzhi Thread 3 is running." << std::endl;});
+  congzhi_t3.Join();
+}
+```
+
+### 2. NUMA Wrapper
