@@ -819,6 +819,7 @@ public:
      * @tparam TArgs Argument types.
      * @param f Callable object.
      * @param args Arguments to pass to the callable.
+     * @param attr Thread attributes for creation.
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
@@ -882,9 +883,9 @@ public:
      * @brief Starts the thread with the given callable and arguments.
      * @tparam TFunc Callable type.
      * @tparam TArgs Argument types.
-     * @param attr Thread attributes for creation.
      * @param f Callable object.
      * @param args Arguments to pass to the callable.
+     * @param attr Thread attributes for creation.
      * @throws std::logic_error if thread is already running.
      * @throws std::runtime_error if thread creation fails.
      */
@@ -1005,6 +1006,83 @@ public:
         sched_yield();
     }
 };
+
+
+namespace this_thread {
+    /**
+     * @brief Yields execution to allow other threads to run.
+     * This is a static method that yields the current thread's execution.
+     */
+    void Yield() noexcept {
+        sched_yield();
+    }
+    
+    /**
+     * @brief Gets the ID of the current thread.
+     * @return The pthread_t ID of the current thread.
+     */
+    pthread_t GetId() noexcept {
+        return pthread_self();
+    }
+
+    /**
+     * @brief Sleeps for a specified duration in milliseconds.
+     * @tparam Rep Duration representation type.
+     * @tparam Period Duration period type.
+     * @param sleep_duration Duration to sleep, specified in milliseconds.
+     * @throws std::invalid_argument if sleep_duration is negative.
+     * @throws std::runtime_error if nanosleep fails.
+     */
+    template <typename Rep, typename Period>
+    void SleepFor(const std::chrono::duration<Rep, Period>& sleep_duration) {
+        if (sleep_duration < std::chrono::milliseconds(0)) {
+            throw std::invalid_argument("Sleep duration cannot be negative");
+        }
+        
+        auto sleep_time = std::chrono::duration_cast<std::chrono::nanoseconds>(sleep_duration).count();
+        if (sleep_time < 0) {
+            throw std::invalid_argument("Sleep duration cannot be negative");
+        }
+        if (sleep_time == 0) {
+            Yield();
+            return;
+        }
+        
+        struct timespec ts;
+        ts.tv_sec = sleep_time / 1'000'000'000; // Convert nanoseconds to seconds
+        ts.tv_nsec = sleep_time % 1'000'000'000; // Remaining nanoseconds
+        
+        for (;;) {
+            if (nanosleep(&ts, &ts) == 0) {
+                return; // Sleep completed successfully
+            }
+            if (res == EINTR) {
+                // Interrupted by a signal, retry nanosleep
+                continue;
+            }
+            // If we reach here, an error occurred
+            throw std::runtime_error("nanosleep failed: " + std::string(strerror(res)));
+        }
+    }
+
+    /**
+     * @brief Sleeps until a specific time point.
+     * @tparam Clock Clock type.
+     * @tparam Duration Duration type of the time point.
+     * @param abs_time Absolute time point to sleep until.
+     * @throws std::invalid_argument if abs_time is in the past.
+     */
+    template <typename Clock, typename Duration>
+    void SleepUntil(const std::chrono::time_point<Clock, Duration>& abs_time) {
+        auto now = Clock::now();
+        if (abs_time <= now) {
+            return; // No need to sleep, the time point is in the past
+        }
+        
+        auto sleep_duration = abs_time - now;
+        SleepFor(sleep_duration);
+    }
+} // namespace this_thread
 } // namespace congzhi
 
 #else

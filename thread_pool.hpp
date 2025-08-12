@@ -25,6 +25,7 @@
 #include <iostream>
 #include <vector>
 #include <queue>
+// #include <deque>
 #include <unordered_map>
 #include <functional>
 #include <memory>
@@ -34,6 +35,7 @@
 #include <atomic>
 #include <stdexcept>
 #include <chrono>
+// #include <random>
 
 namespace congzhi {
     
@@ -557,7 +559,7 @@ private:
         std::atomic<size_t> thread_count {0}; // Number of threads bound to this NUMA node
     };
 
-    const int numa_node_count_{congzhi::Numa::NumaNodeCount()};
+    const int numa_node_count_{congzhi::numa::NumaNodeCount()};
     const size_t min_threads_per_node_{congzhi::Thread::HardwareConcurrency() / numa_node_count_};
     const size_t max_threads_per_node_{(congzhi::Thread::HardwareConcurrency() * 2) / numa_node_count_};
     constexpr size_t expand_factor_{2};
@@ -602,7 +604,7 @@ private:
 
         auto& node_data = node_data_[node_num];
         try {
-            congzhi::Numa::BindThreadToNumaNode(*worker.thread.NativeHandle(), node_num);
+            congzhi::numa::BindThreadToNumaNode(*worker.thread.NativeHandle(), node_num);
         } catch (...) {
             worker.is_valid = false;
             return;
@@ -791,7 +793,7 @@ public:
      * @throws std::runtime_error if NUMA is not supported on the system.
      */
     NumaThreadPool() {
-        if (!congzhi::Numa::IsNumaSupported()) {
+        if (!congzhi::numa::IsNumaSupported()) {
             throw std::runtime_error("NUMA is not supported on this system.");
         }
         node_data_.resize(numa_node_count_);
@@ -841,6 +843,12 @@ public:
                       << ": Threads = " << node_data.thread_count.load() 
                       << ", Tasks in queue = " << node_data.tasks.size() 
                       << std::endl;
+            std::cout << "  Total memory on node " << node_num 
+                      << ": " << congzhi::numa::GetNodeMemorySize(node_num) << " bytes" << std::endl;
+            std::cout << "  Total memory free on node " << node_num
+                      << ": " << congzhi::numa::GetNodeMemoryFreeSize(node_num) << " bytes" << std::endl;
+            std::cout << "  Total CPUs on node " << node_num
+                      << ": " << congzhi::numa::GetNodeCpuCount(node_num) << std::endl;
         }
         std::cout << "Is running: \t" << (running_ ? "Yes" : "No") << std::endl;
         std::cout << "===========================" << std::endl;
@@ -959,7 +967,7 @@ public:
             throw std::runtime_error("Thread pool is not running");
         }
 
-        int node_num = congzhi::Numa::GetNodeCurrentThreadIsOn();
+        int node_num = congzhi::numa::GetNodeCurrentThreadIsOn();
         if (node_num < 0 || node_num >= numa_node_count_) {
             node_num = 0; // Fallback to node 0 if current thread's node is invalid.
         }
