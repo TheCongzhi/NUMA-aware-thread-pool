@@ -843,12 +843,12 @@ public:
                       << ": Threads = " << node_data.thread_count.load() 
                       << ", Tasks in queue = " << node_data.tasks.size() 
                       << std::endl;
-            std::cout << "  Total memory on node " << node_num 
-                      << ": " << congzhi::numa::GetNodeMemorySize(node_num) << " bytes" << std::endl;
-            std::cout << "  Total memory free on node " << node_num
-                      << ": " << congzhi::numa::GetNodeMemoryFreeSize(node_num) << " bytes" << std::endl;
             std::cout << "  Total CPUs on node " << node_num
-                      << ": " << congzhi::numa::GetNodeCpuCount(node_num) << std::endl;
+                      << ": " << congzhi::numa::GetNodeCpuCount(node_num) << std::endl;                      
+            std::cout << "  Memory info for node " << node_num << ":" << std::endl;
+            std::cout << "    Total: " << congzhi::numa::GetNodeMemoryInfo(node_num).total << " bytes" << std::endl;
+            std::cout << "    Free:  " << congzhi::numa::GetNodeMemoryInfo(node_num).free << " bytes" << std::endl;
+            std::cout << "    Used:  " << congzhi::numa::GetNodeMemoryInfo(node_num).used << " bytes" << std::endl;
         }
         std::cout << "Is running: \t" << (running_ ? "Yes" : "No") << std::endl;
         std::cout << "===========================" << std::endl;
