@@ -763,7 +763,10 @@ public:
      */
     void SetDtorAction(DtorAction action) noexcept {
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        dtor_action_ = action;    
+        if (thread_state_ != ThreadState::UNCREATED) {
+            return;
+        }
+        dtor_action_ = action;
     }
 
     /**
@@ -790,6 +793,8 @@ private:
      */
     struct ThreadDataBase {
         congzhi::Thread* thread_;
+
+        explicit ThreadDataBase(congzhi::Thread* thread) : thread_(thread) {}
         virtual ~ThreadDataBase() = default;
         virtual void Execute() = 0;
     };
@@ -802,8 +807,8 @@ private:
     template <typename TFunc>
     struct ThreadData : public ThreadDataBase {
         TFunc callable_;
-        ThreadData(TFunc&& func) 
-            : callable_(std::forward<TFunc>(func)) {}
+        ThreadData(TFunc&& func, congzhi::Thread* thread)
+            : ThreadDataBase(thread), callable_(std::forward<TFunc>(func)) {}
         void Execute() override {
             callable_();
         }
@@ -877,7 +882,7 @@ private:
                 break;
             case DtorAction::TERMINATE:
                 try {
-                    // Terminate();
+                    Terminate();
                 }
                 catch (...) {}
                 break;
@@ -989,7 +994,7 @@ public:
         };
         
         using task_type = decltype(bound_task);
-        auto data = new ThreadData<task_type>(std::move(bound_task));
+        auto data = new ThreadData<task_type>(std::move(bound_task), this);
         
         const int res = pthread_create(
             &thread_handle_, 
@@ -1093,8 +1098,8 @@ public:
         pthread_t handle;
         {
             congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-            if (thread_state_ == ThreadState::UNCREATED) {
-                throw std::logic_error("Thread not created");
+            if (thread_state_ != ThreadState::JOINABLE && thread_state_ != ThreadState::DETACHED) {
+                throw std::logic_error("Thread not joinable");
             }
             handle = thread_handle_;
         }
@@ -1106,6 +1111,75 @@ public:
         if (join_res != 0) {
             throw std::runtime_error("pthread_join after cancel failed: " + std::string(strerror(join_res)));
         }
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        thread_state_ = ThreadState::FINISHED;
+    }
+
+    /**
+     * @brief Terminates the thread execution. And update the thread state.
+     * @throws std::logic_error if thread is not created.
+     * @throws std::runtime_error if terminate fails.
+     */
+    void Terminate() {
+        pthread_t handle;
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+            if (thread_state_ != ThreadState::JOINABLE && thread_state_ != ThreadState::DETACHED) {
+                throw std::logic_error("Thread not running, cannot terminate");
+            }
+            handle = thread_handle_;
+        }
+
+        // First try SIGTERM to terminate the thread gracefully.
+        const int term_res = pthread_kill(handle, SIGTERM);
+        if (term_res != 0) {
+            if (term_res == ESRCH) {
+                throw std::logic_error("Thread already terminated");
+                congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+                thread_state_ = ThreadState::FINISHED; // Mark as finished if already terminated.
+            }
+            throw std::runtime_error("pthread_kill (SIGTERM) failed: " + std::string(strerror(term_res)));
+        }
+
+        // Wait for 100ms to see if the thread terminates gracefully.
+        // if it's still running, we can forcefully terminate it.
+        sigset_t sigset;
+        sigemptyset(&sigset);
+        sigaddset(&sigset, SIGCHLD); // wait for child thread termination signal
+
+        sigset_t oldset;
+        pthread_sigmask(SIG_BLOCK, &sigset, &oldset); // Block SIGCHLD in this thread, this thread would be blocked in sigtimedwait
+
+        struct timespec ts = {0, 100 * 1'000'000}; // 100 milliseconds
+        bool terminated = false;
+        int sigwait_res = sigtimedwait(&sigset, nullptr, &ts);
+        if (sigwait_res == SIGCHLD) {
+            terminated = true; // Thread terminated gracefully
+        } else if (sigwait_res == -1 && errno != EAGAIN && errno != EINTR) {
+            pthread_sigmask(SIG_SETMASK, &oldset, nullptr); // Restore old signal mask
+            throw std::runtime_error("sigtimedwait failed: " + std::string(strerror(errno)));
+        }
+        pthread_sigmask(SIG_SETMASK, &oldset, nullptr); // Restore old signal mask
+
+        if (!terminated) {
+            // Forcefully terminate the thread using SIGKILL
+            const int kill_res = pthread_kill(handle, SIGKILL);
+            if (kill_res != 0) {
+                if (kill_res == ESRCH) {
+                    throw std::logic_error("Thread already terminated");
+                    congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+                    thread_state_ = ThreadState::FINISHED; // Mark as finished if already terminated.
+                }
+                throw std::runtime_error("pthread_kill (SIGKILL) failed: " + std::string(strerror(kill_res)));
+            }
+        }
+        
+        // Wait for the thread to terminate and clean up resources.
+        const int join_res = pthread_join(handle, nullptr);
+        if (join_res != 0) {
+            throw std::runtime_error("pthread_join after terminate failed: " + std::string(strerror(join_res)));
+        }
+
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         thread_state_ = ThreadState::FINISHED;
     }
