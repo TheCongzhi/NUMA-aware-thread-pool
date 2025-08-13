@@ -1,4 +1,4 @@
-#include "pthread_wrapper.hpp"
+#include "../pthread_wrapper.hpp"
 #include <iostream>
 #include <chrono>
 #include <thread>

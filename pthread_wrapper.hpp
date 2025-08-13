@@ -18,7 +18,7 @@
 #include <unistd.h>  // For sysconf -> Get number of underlying processors.
 #include <sched.h>   // For sched_yield -> Yield the current thread.
 
-#include <string>
+#include <cstring>
 #include <functional>
 #include <utility>
 #include <memory>
@@ -64,9 +64,10 @@ public:
         int mutex_type = (type == MutexType::Recursive) ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_DEFAULT;
         const int res2 = pthread_mutexattr_settype(&attr, mutex_type);
         const int res3 = pthread_mutex_init(&mutex_handle_, &attr);
-        if (res2 != 0 || res3 != 0) {
+        int err = (res2 != 0) ? res2 : res3;
+        if (err != 0) {
             pthread_mutexattr_destroy(&attr);
-            throw std::runtime_error("pthread_mutex_init with types failed: " + std::string(strerror(res)));
+            throw std::runtime_error("pthread_mutex_init with types failed: " + std::string(strerror(err)));
         }
         pthread_mutexattr_destroy(&attr);
     }
@@ -409,8 +410,8 @@ public:
             if (status == WaitStatus::Timeout) {
                 return status; // timed out exit
             }
-            return WaitStatus::NoTimeout;
         }
+        return WaitStatus::NoTimeout;
     }
 
     /**
@@ -461,8 +462,8 @@ public:
             if (status == WaitStatus::Timeout) {
                 return status; // timed out exit
             }
-            return WaitStatus::NoTimeout;
         }
+        return WaitStatus::NoTimeout;
     }
 
     /**
@@ -695,7 +696,6 @@ public:
     }
 };
 
-
 /**
  * @brief A cross-platform wrapper around pthreads for thread management.
  *
@@ -715,6 +715,16 @@ public:
     };
     
     /**
+     * @brief Enum representing the action to take on thread destruction.
+     */
+    enum class DtorAction {
+        JOIN,      // Default action: join the thread on destruction.
+        DETACH,    // Detach the thread on destruction.
+        CANCEL,    // Cancel the thread on destruction (not implemented).
+        TERMINATE   // Terminate the thread on destruction (not implemented).
+    };
+
+    /**
      * @brief Get the current thread state as a string.
      * @return Returns a std::string representation of the current thread state. 
      */
@@ -733,7 +743,7 @@ public:
      * @brief Checks if the thread is joinable.
      * @return true if the thread is joinable, false otherwise.
      */
-    bool Joinable() const noexcept {
+    bool IsJoinable() const noexcept {
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         return thread_state_ == ThreadState::JOINABLE;
     }
@@ -742,15 +752,35 @@ public:
      * @brief Checks if the thread is detached.
      * @return true if the thread is detached, false otherwise.
      */
-    bool Detached() const noexcept {
+    bool IsDetached() const noexcept {
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         return thread_state_ == ThreadState::DETACHED;
     }
 
+    /**
+     * @brief Sets the action of congzhi::Thread destructor.
+     * @param action The DtorAction to set.
+     */
+    void SetDtorAction(DtorAction action) noexcept {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        dtor_action_ = action;    
+    }
 
+    /**
+     * @brief Gets the action of congzhi::Thread destructor.
+     * @return The current DtorAction.
+     */
+    DtorAction GetDtorAction() const noexcept {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        return dtor_action_;
+    }
 private:
+    static constexpr ThreadState DefaultThreadState = ThreadState::UNCREATED; // Default thread state.
+    static constexpr DtorAction DefaultDtorAction = DtorAction::DETACH; // Default destructor action.
+
     pthread_t thread_handle_{0};       // Native thread handle.
-    ThreadState thread_state_{ThreadState::UNCREATED};      // Current state of the thread.
+    ThreadState thread_state_{DefaultThreadState};      // Current state of the thread.
+    DtorAction dtor_action_{DefaultDtorAction}; // Action to take on destruction.
     mutable congzhi::Mutex mutex_;  // A mutable mutex for thread safety(M&M rule).
 
     /**
@@ -759,6 +789,7 @@ private:
      * Used to store and execute callable objects in a type-erased manner.
      */
     struct ThreadDataBase {
+        congzhi::Thread* thread_;
         virtual ~ThreadDataBase() = default;
         virtual void Execute() = 0;
     };
@@ -769,8 +800,7 @@ private:
      * @tparam TFunc Type of the callable object.
      */
     template <typename TFunc>
-    struct ThreadData : ThreadDataBase {
-        std::unique_ptr<Thread> thread_ptr_; // Pointer to the thread object.
+    struct ThreadData : public ThreadDataBase {
         TFunc callable_;
         ThreadData(TFunc&& func) 
             : callable_(std::forward<TFunc>(func)) {}
@@ -795,21 +825,65 @@ private:
         } catch (...) {
             // Log or handle exceptions here if needed.
         }
+        if (data->thread_) {
+            congzhi::LockGuard<congzhi::Mutex> lock(data->thread_->mutex_);
+            data->thread_->thread_state_ = ThreadState::FINISHED; // Mark thread as finished.
+        }
+        // Clean up the thread data.
+        data.reset(); // Ensure the thread data is cleaned up.
+        pthread_exit(nullptr); // Exit the thread cleanly.
         return nullptr;
     }
 
     /**
-     * @brief Cleans up thread resources and updates thread state.
-     *
-     * If the thread is still joinable, it is detached to release system resources.
-     * The thread state is then marked as FINISHED.
+     * @brief Cleanup the current thread based on the destructor action.
      */
     void Cleanup() noexcept {
-        if (thread_state_ == ThreadState::JOINABLE) {
-            pthread_detach(thread_handle_);
+        ThreadState current_state;
+        DtorAction current_action;
+        pthread_t handle;
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        
+            current_state = thread_state_;
+            current_action = dtor_action_;
+            handle = thread_handle_;
+            
+            if (current_state == ThreadState::UNCREATED || handle == 0) {
+                return; // Nothing to clean up.
+            }
+            if (current_state == ThreadState::FINISHED || current_state == ThreadState::DETACHED) {
+                return; // Already finished or detached, nothing to do.
+            }
         }
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        thread_state_ = ThreadState::FINISHED;
+        
+        switch (current_action) {
+            case DtorAction::JOIN:
+                try {
+                    Join();
+                } catch (...) {}
+                break;
+            case DtorAction::DETACH:
+                try {
+                    Detach(); // Detach the thread to release resources.
+                }
+                catch (...) {}
+                break;
+            case DtorAction::CANCEL:
+                try{
+                   Cancel(); 
+                }
+                catch(...) {}
+                break;
+            case DtorAction::TERMINATE:
+                try {
+                    // Terminate();
+                }
+                catch (...) {}
+                break;
+            default:
+                break;
+        }
     }
 
 public:
@@ -819,27 +893,30 @@ public:
      * @tparam TArgs Argument types.
      * @param f Callable object.
      * @param args Arguments to pass to the callable.
+     * @param dtor_action Action to take on thread destruction.
      * @param attr Thread attributes for creation.
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
     explicit Thread(TFunc&& f, TArgs&&... args, 
+                    DtorAction dtor_action = DefaultDtorAction,
                     const ThreadAttribute& attr = ThreadAttribute()) {
-        Start(std::forward<TFunc>(f), std::forward<TArgs>(args)..., attr);
+        Start(std::forward<TFunc>(f), std::forward<TArgs>(args)..., dtor_action, attr);
     }
     
     /**
      * @brief Default constructor. Initializes an uncreated thread.
      */
-    Thread() noexcept : thread_handle_(0), thread_state_(ThreadState::UNCREATED) {}
+    Thread() noexcept 
+    : thread_handle_(0),
+      thread_state_(DefaultThreadState),
+      dtor_action_(DefaultDtorAction) {}
     
     /**
      * @brief Destructor. Cleans up the thread if joinable.
      */
     ~Thread() noexcept {
-        if (Joinable()) {
-            Cleanup();
-        }
+        Cleanup();
     }
 
     /// Deleted copy constructor.
@@ -851,12 +928,15 @@ public:
      * @brief Move constructor. Transfers ownership of the thread.
      * @param other Thread to move from.
      */
-    Thread(Thread&& other) noexcept 
-        : thread_handle_(other.thread_handle_), 
-          thread_state_(other.thread_state_) {
-        other.thread_handle_ = 0;
+    Thread(Thread&& other) noexcept {
         congzhi::LockGuard<congzhi::Mutex> lock(other.mutex_);
-        other.thread_state_ = ThreadState::UNCREATED;
+        thread_handle_ = other.thread_handle_; 
+        thread_state_ = other.thread_state_;
+        dtor_action_ = other.dtor_action_;
+   
+        other.thread_handle_ = 0;
+        other.thread_state_ = DefaultThreadState; // Reset to default state
+        other.dtor_action_ = DefaultDtorAction; // Reset to default action
     }
     
     /**
@@ -866,15 +946,18 @@ public:
      */
     Thread& operator=(Thread&& other) noexcept {
         if (this != &other) {
-            if (Joinable()) {
-                Cleanup();
+            if (thread_state_ != ThreadState::UNCREATED) {
+                Cleanup(); // Clean up current thread before moving
             }
-            
+
+            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);            
             thread_handle_ = other.thread_handle_;
             thread_state_ = other.thread_state_;
-            
+            dtor_action_ = other.dtor_action_;
+
             other.thread_handle_ = 0;
-            other.thread_state_ = ThreadState::UNCREATED;
+            other.thread_state_ = DefaultThreadState; // Reset to default state
+            other.dtor_action_ = DefaultDtorAction; // Reset to default action
         }
         return *this;
     }
@@ -885,21 +968,25 @@ public:
      * @tparam TArgs Argument types.
      * @param f Callable object.
      * @param args Arguments to pass to the callable.
+     * @param dtor_action Action to take on thread destruction.
      * @param attr Thread attributes for creation.
      * @throws std::logic_error if thread is already running.
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
-    void Start(TFunc&& f, TArgs&&... args, const ThreadAttribute& attr = ThreadAttribute()) {
-        if (thread_state_ != ThreadState::UNCREATED) {
+    void Start(TFunc&& f, TArgs&&... args, 
+               DtorAction dtor_action = DefaultDtorAction,
+               const ThreadAttribute& attr = ThreadAttribute()) {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        if (thread_state_ != DefaultThreadState) {
             throw std::logic_error("Thread is already started");
         }
         
-        auto bound_task = std::bind(std::forward<TFunc>(f), std::forward<TArgs>(args)...);
-        // auto bound_task = [func = std::forward<TFunc>(f), 
-        //                   tup = std::make_tuple(std::forward<TArgs>(args)...)]() mutable {
-        //     std::apply(std::move(func), std::move(tup));
-        // };
+        //auto bound_task = std::bind(std::forward<TFunc>(f), std::forward<TArgs>(args)...);
+        auto bound_task = [func = std::forward<TFunc>(f), 
+                          tup = std::make_tuple(std::forward<TArgs>(args)...)]() mutable {
+            std::apply(std::move(func), std::move(tup));
+        };
         
         using task_type = decltype(bound_task);
         auto data = new ThreadData<task_type>(std::move(bound_task));
@@ -914,8 +1001,8 @@ public:
             delete data;
             throw std::runtime_error("pthread_create failed: " + std::string(strerror(res)));
         }
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         thread_state_ = ThreadState::JOINABLE;
+        dtor_action_ = dtor_action; // Set the destructor action
     }
     
     /**
@@ -930,10 +1017,18 @@ public:
     /**
      * @brief Returns a pointer to the native thread handle.
      * @return Pointer to pthread_t if joinable, otherwise nullptr.
+     * @warning Direct manipulation of the native handle is discouraged, which may break RAII guarantees.
      */
     pthread_t* NativeHandle() noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        return (thread_state_ == ThreadState::JOINABLE) ? &thread_handle_ : 0;
+        return (thread_state_ == ThreadState::JOINABLE) ? &thread_handle_ : nullptr;
+    }
+
+    /**
+     * @brief Returns a const pointer to the native thread handle.
+     * @return Const pointer to pthread_t if joinable, otherwise nullptr.
+     */
+    const pthread_t* NativeHandle() const noexcept {
+        return (thread_state_ == ThreadState::JOINABLE) ? &thread_handle_ : nullptr;
     }
 
     /**
@@ -946,15 +1041,20 @@ public:
     }
 
     /**
-     * @brief Waits for the thread to finish execution.
+     * @brief Waits for the thread to finish execution. And update the thread state.
      * @throws std::logic_error if thread is not joinable.
      * @throws std::runtime_error if join fails.
      */
     void Join() {
-        if (!Joinable()) {
-            throw std::logic_error("Thread not joinable");
+        pthread_t handle;
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+            if (thread_state_ != ThreadState::JOINABLE) {
+                throw std::logic_error("Thread not joinable");
+            }
+            handle = thread_handle_;
         }
-        const int res = pthread_join(thread_handle_, nullptr);
+        const int res = pthread_join(handle, nullptr);
         if (res != 0) {
             throw std::runtime_error("pthread_join failed: " + std::string(strerror(res)));
         }
@@ -963,20 +1063,51 @@ public:
     }
     
     /**
-     * @brief Detaches the thread, allowing it to run independently.
+     * @brief Detaches the thread, allowing it to run independently. And update the thread state.
      * @throws std::logic_error if thread is not joinable.
      * @throws std::runtime_error if detach fails.
      */
     void Detach() {
-        if (!Joinable()) {
-            throw std::logic_error("Thread not joinable");
+        pthread_t handle;
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+            if (thread_state_ != ThreadState::JOINABLE) {
+                throw std::logic_error("Thread not joinable");
+            }
+            handle = thread_handle_;
         }
-        const int res = pthread_detach(thread_handle_);
+        const int res = pthread_detach(handle);
         if (res != 0) {
-            throw std::runtime_error("pthread_detach failed" + std::string(strerror(res)));
+            throw std::runtime_error("pthread_detach failed: " + std::string(strerror(res)));
         }
         congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
         thread_state_ = ThreadState::DETACHED;
+    }
+
+    /**
+     * @brief Cancels the thread execution. And update the thread state.
+     * @throws std::logic_error if thread is not created.
+     * @throws std::runtime_error if cancel fails.
+     */
+    void Cancel() {
+        pthread_t handle;
+        {
+            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+            if (thread_state_ == ThreadState::UNCREATED) {
+                throw std::logic_error("Thread not created");
+            }
+            handle = thread_handle_;
+        }
+        const int cancel_res = pthread_cancel(handle);
+        if (cancel_res != 0) {
+            throw std::runtime_error("pthread_cancel failed: " + std::string(strerror(cancel_res)));
+        }
+        const int join_res = pthread_join(handle, nullptr);
+        if (join_res != 0) {
+            throw std::runtime_error("pthread_join after cancel failed: " + std::string(strerror(join_res)));
+        }
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
+        thread_state_ = ThreadState::FINISHED;
     }
 
     /**
@@ -997,6 +1128,7 @@ public:
         congzhi::LockGuard<congzhi::Mutex> lock2(second->mutex_);
         std::swap(thread_handle_, other.thread_handle_);
         std::swap(thread_state_, other.thread_state_);
+        std::swap(dtor_action_, other.dtor_action_);
     }
 
     /**
@@ -1053,10 +1185,11 @@ namespace this_thread {
         ts.tv_nsec = sleep_time % 1'000'000'000; // Remaining nanoseconds
         
         for (;;) {
-            if (nanosleep(&ts, &ts) == 0) {
+            int res = nanosleep(&ts, &ts);
+            if (res == 0) {
                 return; // Sleep completed successfully
             }
-            if (res == EINTR) {
+            if (errno == EINTR) {
                 // Interrupted by a signal, retry nanosleep
                 continue;
             }
@@ -1089,3 +1222,4 @@ namespace this_thread {
 #error "This pthread wrapper is only supported on Apple and Linux platforms."
 #endif // __APPLE__ || __linux__
 #endif // PTHREAD_WRAPPER_HPP
+

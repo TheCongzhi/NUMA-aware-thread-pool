@@ -428,7 +428,7 @@ public:
         monitoring_ = false;
         monitor_cond_.NotifyOne(); // Stop the monitoring thread
 
-        if (monitor_thread_ && monitor_thread_->Joinable()) {
+        if (monitor_thread_ && monitor_thread_->IsJoinable()) {
             monitor_thread_->Join();
             monitor_thread_.reset();
         }
@@ -461,7 +461,7 @@ public:
 
         congzhi::LockGuard<congzhi::Mutex> lock(worker_mutex_);
         for (auto& worker : workers_) {
-            if (worker && worker->thread.Joinable()) {
+            if (worker && worker->thread.IsJoinable()) {
                 worker->thread.Join(); // Wait for all worker threads to finish.
                 worker->should_exit = true; // Mark the thread for exit.
             }
