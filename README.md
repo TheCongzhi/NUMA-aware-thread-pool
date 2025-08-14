@@ -3,7 +3,7 @@
 - [English](README.md)
 - [简体中文](README.zh_CN.md)
 
-A modern C++17 thread pool library featuring a Linux‑only NUMA‑aware pool—built to maximize memory locality and minimize cross‑node latency—plus a portable non‑NUMA pool and POSIX pthread wrappers, designed for optimal performance accross multi-core architectures on Linux and macOS. With explicit support for NUMA architectures, this implementation addresses the unique challenges for memory locality and cross-NUMA-node latency in multi CPU socket systems(NUMA systems).
+A modern C++17 thread pool library featuring a Linux‑only NUMA‑aware pool—built to maximize memory locality and minimize cross‑node latency—plus a portable non‑NUMA pool, designed for optimal performance accross multi-core architectures on Linux and macOS. With explicit support for NUMA architectures, this implementation addresses the unique challenges for memory locality and cross-NUMA-node latency in multi CPU socket systems(NUMA systems).
 
 ## Core Components
 
@@ -156,7 +156,7 @@ int main() {
 }
 ```
 
-- `congzhi::Thread`: A movable RAII thread wrapper built on top of `pthread` (POSIX threads), providing a safe and easy-to-use thread usage interface that acts like `std::thread`. Compared to `std::thread`, `congzhi::Thread` offers explicit thread state tracking via the `ThreadState enum`, integrates a dedicated `ThreadAttribute` class for declarative configuration of pthread-specific properties, and automatically detaches joinable threads in its destructor to prevent resource leaks (in a way similar to `std::jthread`). Most importantly, it provides the `congzhi::Thread::Start()` method, which allows the delayed start of a thread. I'll put several examples for you on how to use `congzhi::Thread`.
+- `congzhi::Thread`: A movable RAII thread wrapper built on top of `pthread_t` (POSIX threads), providing a safe and easy-to-use thread usage interface that acts like `std::thread`. Compared to `std::thread`, `congzhi::Thread` offers explicit thread state tracking via the `ThreadState enum`, integrates a dedicated `ThreadAttribute` class for declarative configuration of pthread-specific properties, and automatically detaches/joins/terminates/cancels joinable threads in its destructor to prevent resource leaks (in a way similar to `std::jthread`). Most importantly, it provides the `congzhi::Thread::Start()` method, which allows the delayed start of a thread. I'll put several examples for you on how to use `congzhi::Thread`.
 
 ```cpp
 // About the Start() method:
@@ -184,6 +184,145 @@ int main () {
   congzhi::Thread congzhi_t3;
   congzhi_t3.Start([]() {std::cout << "Congzhi Thread 3 is running." << std::endl;});
   congzhi_t3.Join();
+}
+```
+
+```cpp
+// Different destructor actions of congzhi::Thread class
+
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+
+int main()
+{
+    congzhi::Mutex mutex;
+
+    // Create a thread with default destructor action (JOIN)
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread1([]()
+                                { std::cout << "Thread 1 is running." << std::endl; });
+        thread1.Join();                                                 // Explicitly join the thread
+        std::cout << "The thread's state is: "<< thread1.GetThreadState() // Get the state after joining, should be TERMINATED
+                  << "\nFinishes its job? " << (thread1.IsCompleteExecution() ? "Yes" : "No") // Is thread finishes its job after Join()? Should be Yes
+                  << std::endl; 
+    }
+
+    // Create a thread with JOIN action
+    // Main thread will wait for thread2 to finish before exiting
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread2([]()
+                                { std::cout << "Thread 2 is running." << std::endl; }, congzhi::DtorAction::JOIN);
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100));
+        std::cout << "The thread's state is: "<< thread2.GetThreadState() // Should be joinable, bacause the dtor han't been called.
+                  << "\nFinishes its job? " << (thread2.IsCompleteExecution() ? "Yes" : "No") // Is thread finishes its job after 100ms sleep? Should be Yes
+                  << std::endl; 
+    }
+
+    // Create a thread with DETACH action
+    // Main thread will detach thread3 when this stack frame returns, detached threads would cleaned up automatically when it finishes, main thread won't wait for it
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread3([]()
+                                { std::cout << "Thread 3 is running." << std::endl; }, congzhi::DtorAction::DETACH);
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100));
+        std::cout << "The thread's state is: "<< thread3.GetThreadState() // Should be joinable, bacause the dtor han't been called.
+                  << "\nFinishes its job? " << (thread3.IsCompleteExecution() ? "Yes" : "No") // Is thread finishes its job after 100ms sleep? Should be Yes
+                  << std::endl;     
+    }
+
+    // Create a thread with CANCEL action
+    // Beware!! Caller should set cancel point or the action would block forever!!
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread4([]()
+                                {            
+            while (true) {
+                std::cout << "Thread 4 is running." << std::endl;
+                congzhi::this_thread::SleepFor(std::chrono::milliseconds(10));
+            } }, congzhi::DtorAction::CANCEL);
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100)); // Ensure thread4 has started and running
+        thread4.Cancel();
+        std::cout << "The thread's state is: "<< thread4.GetThreadState() // Get the state after cancellation, should be TERMINATED
+                  << "\nFinishes its job? " << (thread4.IsCompleteExecution() ? "Yes" : "No") // Is thread finishes its job after cancellation? Should be No
+                  << std::endl; 
+    }
+
+    // Create a thread with TERMINATE action
+    // In this way, the thread must handle SIGTERM signal to exit gracefully
+    // If there's no signal handler registered, the default action will terminate the entire process
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread5([]() {
+            // Register signal handler for SIGTERM
+            struct sigaction sa;
+            sa.sa_handler = [](int) {
+            std::cout << "Thread 5 exiting gracefully." << std::endl;
+            pthread_exit(nullptr);
+            };
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            sigaction(SIGTERM, &sa, nullptr);
+
+            // The thread's main loop
+            while (true) {
+                std::cout << "Thread 5 is running." << std::endl;
+                congzhi::this_thread::SleepFor(std::chrono::milliseconds(10));
+        } }, congzhi::DtorAction::TERMINATE);
+
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100)); // Ensure thread5 has started and running
+        try
+        {
+            thread5.Terminate(); // Terminate the thread
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error terminating thread: " << e.what() << std::endl;
+        }
+        std::cout << "The thread's state is: "<< thread5.GetThreadState() // Get the state after termination, should be TERMINATED
+                  << "\nFinishes its job? " << (thread5.IsCompleteExecution() ? "Yes" : "No") // Is thread finishes its job after cancellation? Should be No
+                  << std::endl; 
+    }
+    std::cout << "All threads have been cleaned up." << std::endl;
+    return 0;
+}
+```
+
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+
+int main() {
+    congzhi::ThreadAttribute attr; // Declare a ThreadAttribute object at first
+
+    // Set arrtibutes
+    attr.SetStackSize(4 * 1024 * 1024); // Stack size in bytes
+    attr.SetScope(congzhi::Scope::System); // or Scope::Process
+    attr.SetDetachState(congzhi::DetachState::Joinable); // or DetachState::Detached
+    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::Default, 0); // or SchedulingPolicy::FIFO/Scheduling::RR
+    std::cout << "Thread attributes set successfully." << std::endl;
+
+    congzhi::Thread t1(
+        [&](){
+            congzhi::this_thread::SleepFor(std::chrono::seconds(1));
+            std::cout << "Thread is running with custom attributes." << std::endl;
+            std::cout << "Thread ID: " << pthread_self() << std::endl;
+            std::cout << "Thread stack size:" << attr.GetStackSize() << std::endl;
+            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "System" : "Process") << std::endl;
+            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "Detached" : "Joinable") << std::endl;
+            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "Default" : "Custom") << std::endl;
+        },
+        congzhi::DtorAction::DETACH, // DtorAction
+        attr
+    );
+    congzhi::this_thread::SleepFor(std::chrono::seconds(2));
+    try {
+        t1.Join(); // The thread IS joinable, but since we set dtor action to DtorAction::DETACH, so there's a logic error
+    } catch (const std::logic_error& e) {
+        std::cerr << "Logic error: " << e.what() << std::endl;
+    }
+    return 0;
 }
 ```
 

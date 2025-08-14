@@ -24,6 +24,4 @@ congzhi_t2.Join();
 congzhi::Thread congzhi_t3;
 congzhi_t3.Start([]() {std::cout << "Congzhi Thread 3 is running." << std::endl;});
 congzhi_t3.Join();
-
-
 }

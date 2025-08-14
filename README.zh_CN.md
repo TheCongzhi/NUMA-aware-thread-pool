@@ -3,7 +3,7 @@
 - [简体中文](README.zh_CN.md)
 - [English](README.md)
 
-使用 C++17 实现了一个含有 NUMA 感知的线程池（仅限 Linux）和非 NUMA 感知的线程池（macOS 也可以用）的线程池库以及一个封装 POSIX 标准线程的封装库，旨在能够在 Linux 和 macOS 平台上发挥多核心处理器的最大性能。因为线程池支持 NUMA 架构，相比于其他的线程池实现，NUMA 感知的线程池能够最大化利用 NUMA 系统中节点内存局部性和跨 NUMA 节点延迟的问题。
+使用 C++17 实现了一个含有 NUMA 感知的线程池（仅限 Linux）和非 NUMA 感知的线程池（macOS 也可以用）的线程池库，旨在在 Linux 和 macOS 平台上发挥多核心处理器的最大性能。因为线程池支持 NUMA 架构，相比于其他的线程池实现，NUMA 感知的线程池能够最大化利用 NUMA 系统中节点内存局部性和跨 NUMA 节点延迟的问题。
 
 ## 核心组件
 
@@ -154,7 +154,7 @@ int main() {
 }
 ```
 
-- `congzhi::Thread`: 基于 `pthread` 的可移动 RAII 线程封装，提供安全易用的线程接口，功能类似于 `std::thread`，但相比之下，`congzhi::Thread`支持通过`ThreadState`枚举线程安全地显示获取线程的状态，同时集成专用的 `ThreadAttribute` 类来为 `pthread` 配置特定属性（`congzhi::Thread` 底层就是 `pthread`）。在析构时，自动分离可连接的线程以防止资源泄漏（类似于std::jthread）。此外，它提供了 `congzhi::Thread::Start()` 方法，允许线程的延迟启动。以下是几个使用 `congzhi::Thread` 的示例：
+- `congzhi::Thread`: 基于 `pthread_t` 的可移动 RAII 线程封装，提供安全易用的线程接口，功能类似于 `std::thread`，但相比之下，`congzhi::Thread`支持通过`ThreadState`枚举线程安全地显示获取线程的状态，同时集成专用的 `ThreadAttribute` 类来为 `pthread` 配置特定属性（`congzhi::Thread` 底层就是 `pthread_t`）。在析构时，自动分离/加入/终止/取消可连接的线程以防止资源泄漏（类似于`std::jthread`）。此外，它提供了 `congzhi::Thread::Start()` 方法，允许线程的延迟启动。以下是几个使用 `congzhi::Thread` 的示例：
 
 ```cpp
 // 关于Start()方法：
@@ -185,4 +185,143 @@ int main () {
 }
 ```
 
-### 2. NUMA Wrapper
+```cpp
+// congzhi::Thread 线程类不同的析构实现，这里仅作不同析构函数析构时的行为示例。因为析构函数中也是调用这些函数。你可以把主线程中的等待和显式调用方法取掉观察程序执行行为。
+
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+
+int main()
+{
+    congzhi::Mutex mutex;
+
+    // 创建线程，使用默认的线程析构方式（JOIN）
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread1([]()
+                                { std::cout << "Thread 1 is running." << std::endl; });
+        thread1.Join();                                     // 提前显示加入线程
+        std::cout << "The thread's state is: "<< thread1.GetThreadState() // 线程已经 Join() 了，所以线程的状态是 TERMINATED 了
+                  << "\nFinishes its job? " << (thread1.IsCompleteExecution() ? "Yes" : "No") // 当前的主线程会阻塞等待 thread1 执行结束，所以这里的线程执行完毕了，所以这里应当是 Yes
+                  << std::endl; 
+    }
+
+    // 使用 JOIN 的析构行为创建线程
+    // 析构时，当前线程就会阻塞等待 thread2 加入
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread2([]()
+                                { std::cout << "Thread 2 is running." << std::endl; }, congzhi::Thread::DtorAction::JOIN);
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100)); // 确保线程执行完毕
+        std::cout << "The thread's state is: "<< thread2.GetThreadState() // 因为直到析构函数才会 Detach 线程，所以这里仍是 JOINABLE 的状态
+                  << "\nFinishes its job? " << (thread2.IsCompleteExecution() ? "Yes" : "No") // 因为我们确保了线程执行完毕，所以线程已经执行完毕了，这里应当是 Yes
+                  << std::endl; 
+    }
+
+    // 使用 DETACH 的析构行为创建线程
+    // 析构时当前线程就会将析构行为的线程分离。分离后，线程资源将被操作系统接管，主线程不需要等待线程完成，也不必担心线程资源泄漏问题
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread3([]()
+                                { std::cout << "Thread 3 is running." << std::endl; }, congzhi::Thread::DtorAction::DETACH);
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100)); // 确保线程执行完毕
+        std::cout << "The thread's state is: "<< thread3.GetThreadState() // 由于直到析构函数才会 Detach 线程，所以这里的状态仍然是 JOINABLE
+                  << "\nFinishes its job? " << (thread3.IsCompleteExecution() ? "Yes" : "No") // 因为我们确保了线程执行完毕，所以线程已经执行完了，所以这里应当是 Yes
+                  << std::endl; 
+    }
+
+    // 使用 CANCEL 的析构行为创建线程
+    // 在这种情况下，线程执行函数中必须提供取消点以确保线程取消，否则死锁给你看
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread4([]()
+                                {            
+            while (true) {
+                std::cout << "Thread 4 is running." << std::endl;
+                congzhi::this_thread::SleepFor(std::chrono::milliseconds(10));
+            } }, congzhi::Thread::DtorAction::CANCEL);
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100)); // 确保 thread4 先运行
+        thread4.Cancel();
+        std::cout << "The thread's state is: "<< thread4.GetThreadState() // 由于线程被取消掉了，所以这里应当输出 TERMINATED
+                  << "\nFinishes its job? " << (thread4.IsCompleteExecution() ? "Yes" : "No") // 因为线程在执行过程中被取消，所以线程没有执行完毕，这里是 No
+                  << std::endl; 
+    }
+
+    // 使用 TERMINATE 的析构行为创建线程，在析构时会像目标线程发送信号
+    // 在这种方式下，线程执行函数中必须注册信号服务例程来优雅退出（可以在服务例程中释放线程申请的资源）。
+    // 如果不注册信号服务例程，那么信号就会终止整个进程
+    {
+        congzhi::LockGuard<congzhi::Mutex> lock(mutex);
+        congzhi::Thread thread5([]() {
+            // 注册服务例程，服务例程中输出一句话之后 exit()
+            struct sigaction sa;
+            sa.sa_handler = [](int) {
+            std::cout << "Thread 5 exiting gracefully." << std::endl;
+            pthread_exit(nullptr);
+            };
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            sigaction(SIGTERM, &sa, nullptr);
+
+            // 线程的主循环
+            while (true) {
+                std::cout << "Thread 5 is running." << std::endl;
+                congzhi::this_thread::SleepFor(std::chrono::milliseconds(10));
+        } }, congzhi::Thread::DtorAction::TERMINATE);
+
+        congzhi::this_thread::SleepFor(std::chrono::milliseconds(100)); // 确保 thread5 先运行
+        try
+        {
+            thread5.Terminate(); // 终止线程
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error terminating thread: " << e.what() << std::endl;
+        }
+        std::cout << "The thread's state is: "<< thread5.GetThreadState() // 获取终止后的线程状态，应当为 TERMINATED
+                  << "\nFinishes its job? " << (thread5.IsCompleteExecution() ? "Yes" : "No") // 由于线程执行的是死循环，所以线程不可能完成执行。这里应当是 No
+                  << std::endl; 
+    }
+    std::cout << "All threads have been cleaned up." << std::endl; // 全部例子完成
+    return 0;
+}
+```
+
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+
+int main() {
+    congzhi::ThreadAttribute attr; // 声明一个线程属性对象
+
+    // 设置属性
+    attr.SetStackSize(4 * 1024 * 1024); // 以字节为单位的栈大小（默认 8MB）
+    attr.SetScope(congzhi::Scope::System); // 线程竞争 CPU 的范围（默认系统内竞争），也可以设置 Scope::Process，与进程内的线程竞争
+    attr.SetDetachState(congzhi::DetachState::Joinable); // 默认线程是可加入（也可以设置 DetachState::Detached，规定只能分离线程）
+    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::Default, 0); // 设置线程的调度策略和线程优先级（还可以设置 SchedulingPolicy::FIFO/Scheduling::RR）
+    std::cout << "Thread attributes set successfully." << std::endl;
+
+    congzhi::Thread t1(
+        [&](){
+            congzhi::this_thread::SleepFor(std::chrono::seconds(1));
+            std::cout << "Thread is running with custom attributes." << std::endl;
+            std::cout << "Thread ID: " << pthread_self() << std::endl;
+            std::cout << "Thread stack size:" << attr.GetStackSize() << std::endl;
+            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "System" : "Process") << std::endl;
+            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "Detached" : "Joinable") << std::endl;
+            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "Default" : "Custom") << std::endl;
+        },
+        congzhi::DtorAction::DETACH, // 设置线程的析构行为是 DETACH
+        attr
+    );
+    congzhi::this_thread::SleepFor(std::chrono::seconds(2));
+    try {
+        t1.Join(); // 虽然线程可加入，但是我们设置了线程的析构行为是 DETACH，所以强行加入会导致逻辑错误
+    } catch (const std::logic_error& e) {
+        std::cerr << "Logic error: " << e.what() << std::endl;
+    }
+    return 0;
+}
+```
+
+### 2. NUMA 封装库
