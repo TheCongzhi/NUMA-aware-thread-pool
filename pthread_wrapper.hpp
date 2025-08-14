@@ -14,9 +14,13 @@
 #define PTHREAD_WRAPPER_HPP
 
 #if defined(__APPLE__) || defined(__linux__)
+
 #include <pthread.h> // For pthreads -> Thread management.
 #include <unistd.h>  // For sysconf -> Get number of underlying processors.
 #include <sched.h>   // For sched_yield -> Yield the current thread.
+#include <signal.h> // For congzhi::Thread::DtorAction::TERMINATE (pthread_kill)
+#include <time.h>
+
 
 #include <cstring>
 #include <functional>
@@ -30,6 +34,16 @@
 
 namespace congzhi {
 
+
+/**
+ * @brief Mutex types supported by the implementation.
+ */
+enum class MutexType {
+    Default, // Default mutex type.
+    Recursive, // Recursive mutex type.
+    // Error checking mutex type.
+};
+
 /**
  * @brief A lightweight wrapper around pthread mutex for mutual exclusion.
  *
@@ -40,15 +54,6 @@ class Mutex {
 private:
     pthread_mutex_t mutex_handle_;
 public:
-    /**
-     * @brief Mutex types supported by the implementation.
-     */
-    enum class MutexType {
-        Default, // Default mutex type.
-        Recursive, // Recursive mutex type.
-        // Error checking mutex type.
-    };
-
     /**
      * @brief Constructs and initializes the mutex.
      * @param type The type of mutex to create.
@@ -95,7 +100,7 @@ public:
     void Lock() {
         const int res = pthread_mutex_lock(&mutex_handle_);
         if (res != 0) {
-            throw std::runtime_error("pthread_mutex_lock failed: " + std::string(strerror(res)));
+            throw std::runtime_error("pthread_mutex_lock failed:" + std::string(strerror(res)));
         }
     }
 
@@ -278,6 +283,14 @@ public:
 };
 
 /**
+ * @brief Enum representing the status of a wait operation in class ConditionVarible.
+ */
+enum class WaitStatus {
+    NoTimeout, // Wait completed without timeout.
+    Timeout    // Wait timed out.
+};
+
+/**
  * @brief A wrapper around pthread condition variable for thread synchronization.
  *
  * Supports waiting with or without predicates, and with timeouts.
@@ -287,19 +300,15 @@ class ConditionVariable {
 private:
     pthread_cond_t cond_handle_;
 public:
-    /**
-     * @brief Enum representing the status of a wait operation.
-     */
-    enum class WaitStatus {
-        NoTimeout, // Wait completed without timeout.
-        Timeout    // Wait timed out.
-    };
-
+    
     /**
      * @brief Constructs and initializes the condition variable.
      * @throws std::runtime_error if initialization fails.
      */
     ConditionVariable() {
+        pthread_condattr_t attr;
+        pthread_condattr_init(&attr);
+
         const int res = pthread_cond_init(&cond_handle_, nullptr); 
         if (res != 0) {
             throw std::runtime_error("pthread_cond_init failed: " + std::string(strerror(res)));
@@ -499,6 +508,36 @@ public:
 };
 
 /**
+ * @brief Enum representing the scope of threads.
+ */
+enum class Scope {
+    Process, // Process scope. The CPU race is happening within a single process.
+    System   // System scope. The CPU race is happening across all threads in the system.
+};
+
+/**
+ * @brief Enum representing the detach state of threads.
+ */
+enum class DetachState {
+    Joinable, // Thread is joinable and can be waited on.
+    Detached   // Thread is detached and cannot be waited on (pthread_join invalid).
+};
+
+/**
+ * @brief Enum representing the scheduling policy for threads.
+ * 
+ * Priority values for scheduling policies:
+ * - SCHED_OTHER: Default scheduling policy (0 priority).
+ * - SCHED_FIFO: Platform specific.
+ * - SCHED_RR: Platform specific.
+ */
+enum class SchedulingPolicy {
+    Default, // Default scheduling policy (Completely Fair Scheduler for Linux and Core Foundation Scheduler for macOS).
+    FIFO,    // First In First Out scheduling policy.
+    RR // Round Robin scheduling policy.
+};
+
+/**
  * @brief A wrapper around pthread attributes for thread creation.
  * This auxiliary class provides a way to set thread attributes.
  */
@@ -506,37 +545,6 @@ class ThreadAttribute {
 private:
     pthread_attr_t attr_handle_;
 public:
-    
-    /**
-     * @brief Enum representing the scope of threads.
-     */
-    enum class Scope {
-        Process, // Process scope. The CPU race is happening within a single process.
-        System   // System scope. The CPU race is happening across all threads in the system.
-    };
-
-    /**
-     * @brief Enum representing the detach state of threads.
-     */
-    enum class DetachState {
-        Joinable, // Thread is joinable and can be waited on.
-        Detached   // Thread is detached and cannot be waited on.
-    };
-
-    /**
-     * @brief Enum representing the scheduling policy for threads.
-     * 
-     * Priority values for scheduling policies:
-     * - SCHED_OTHER: Default scheduling policy (0 priority).
-     * - SCHED_FIFO: Platform specific.
-     * - SCHED_RR: Platform specific.
-     */
-    enum class SchedulingPolicy {
-        Default, // Default scheduling policy (Completely Fair Scheduler for Linux and Core Foundation Scheduler for macOS).
-        FIFO,    // First In First Out scheduling policy.
-        RR // Round Robin scheduling policy.
-    };
-
     /**
      * @brief Constructs and initializes the thread attributes with default settings.
      * @throws std::runtime_error if initialization fails.
@@ -596,7 +604,7 @@ public:
      * @param priority The priority level (default is 0).
      * @throws std::runtime_error if setting scheduling policy or priority fails.
      */
-    void SetSchedulerPolicy(SchedulingPolicy policy = SchedulingPolicy::Default, int priority = 0) {
+    void SetSchedulingPolicy(SchedulingPolicy policy = SchedulingPolicy::Default, int priority = 0) {
         int policy_value;
         switch (policy) {
             case SchedulingPolicy::Default: {
@@ -652,6 +660,25 @@ public:
     }
 
     /**
+     * @brief Gets the scheduling policy of threads created with these attributes.
+     * @return The scheduling policy (SchedulingPolicy::Default, SchedulingPolicy::FIFO, or SchedulingPolicy::RR).
+     * @throws std::runtime_error if getting scheduling policy fails.
+     */
+    SchedulingPolicy GetSchedulingPolicy() const {
+        int policy;
+        const int res = pthread_attr_getschedpolicy(&attr_handle_, &policy);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_getschedpolicy failed: " + std::string(strerror(res)));
+        }
+        switch (policy) {
+            case SCHED_OTHER: return SchedulingPolicy::Default;
+            case SCHED_FIFO: return SchedulingPolicy::FIFO;
+            case SCHED_RR: return SchedulingPolicy::RR;
+            default: throw std::runtime_error("Unknown scheduling policy");
+        }
+    }
+
+    /**
      * @brief Sets the scope of threads created with these attributes.
      * @param scope The scope to set (Process or System).
      * @note Process scope may not be supported on most systems.
@@ -665,6 +692,20 @@ public:
         }
     }
 
+    /**
+     * @brief Gets the scope of threads created with these attributes.
+     * @return The scope (Process or System).
+     * @throws std::runtime_error if getting scope fails.
+     */
+    Scope GetScope() const {
+        int scope_value;
+        const int res = pthread_attr_getscope(&attr_handle_, &scope_value);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_getscope failed: " + std::string(strerror(res)));
+        }
+        return (scope_value == PTHREAD_SCOPE_PROCESS) ? Scope::Process : Scope::System;
+    }
+
     /** 
      * @brief Sets the detach state of threads created with these attributes.
      * @param detached DetachState indicating whether the thread is joinable or detached (Joinable in default).
@@ -676,6 +717,20 @@ public:
         if (res != 0) {
             throw std::runtime_error("pthread_attr_setdetachstate failed: " + std::string(strerror(res)));
         }
+    }
+
+    /**
+     * @brief Gets the detach state of threads created with these attributes.
+     * @return DetachState indicating whether the thread is joinable or detached.
+     * @throws std::runtime_error if getting detach state fails.
+     */
+    DetachState GetDetachState() const {
+        int detach_state;
+        const int res = pthread_attr_getdetachstate(&attr_handle_, &detach_state);
+        if (res != 0) {
+            throw std::runtime_error("pthread_attr_getdetachstate failed: " + std::string(strerror(res)));
+        }
+        return (detach_state == PTHREAD_CREATE_DETACHED) ? DetachState::Detached : DetachState::Joinable;
     }
 
     /**
@@ -697,104 +752,133 @@ public:
 };
 
 /**
+ * @brief Enum representing the state of a thread.
+ */
+enum class ThreadState {
+    JOINABLE,   // Thread is running and can be joined.
+    DETACHED,   // Thread is detached, running independently.
+    TERMINATED, // Thread is terminated.
+    INVALID     // Thread has not been created or is in an invalid state.
+};
+// The state machine behaves like as follows:
+//                 _______________
+//                ⬇              ⬆
+//                ⬇              ⬆
+// INVALID---->JOINABLE----->TERMINATED
+//               ⬆ ⬇            ⬆
+//               ⬆ ⬇            ⬆
+//             DETACHED-----------/
+
+/**
+ * @brief Enum representing the action to take on thread destruction.
+ */
+enum class DtorAction {
+    JOIN,      // Join the thread on destruction. JOINABLE -> TERMINATED
+    DETACH,    // Detach the thread on destruction. JOINABLE -> DETACHED -> TERMINATED
+    CANCEL,    // Request thread cancellation on destruction. JOINABLE/DETACHED -> TERMINATED
+    TERMINATE  // Terminate the thread on destruction. JOINABLE/DETACHED -> TERMINATED
+};
+
+/**
  * @brief A cross-platform wrapper around pthreads for thread management.
  *
  * Provides a high-level interface for creating, starting, managing, and synchronizing threads.
  * Supports move semantics, thread state tracking, and RAII-style cleanup.
  */
 class Thread {
-public:
+private:
     /**
-     * @brief Enum representing the state of a thread.
+     * @brief Internal thread properties managed by shared pointer.
      */
-    enum class ThreadState {
-        JOINABLE,   // Thread is running and can be joined.
-        DETACHED,   // Thread is detached, running independently.
-        FINISHED,   // Thread has finished execution.
-        UNCREATED   // Thread has not been created or is in an invalid state.
+    struct ThreadProperty {
+        pthread_t thread_handle {0}; // Native thread handle.
+        ThreadState thread_state {DefaultThreadState}; // Current state of the thread.
+        DtorAction dtor_action {DefaultDtorAction}; // Action to take on destruction.
+        mutable congzhi::Mutex mutex; // A mutable mutex for thread safety(M&M rule).
     };
     
-    /**
-     * @brief Enum representing the action to take on thread destruction.
-     */
-    enum class DtorAction {
-        JOIN,      // Default action: join the thread on destruction.
-        DETACH,    // Detach the thread on destruction.
-        CANCEL,    // Cancel the thread on destruction (not implemented).
-        TERMINATE   // Terminate the thread on destruction (not implemented).
-    };
+    std::shared_ptr<ThreadProperty> property_ = std::make_shared<ThreadProperty>();
 
+public:
+    static constexpr ThreadState DefaultThreadState = ThreadState::INVALID; // Default thread state (Invalid).    
+    static constexpr DtorAction DefaultDtorAction = DtorAction::JOIN; // Default destructor action (JOIN).
+    
     /**
      * @brief Get the current thread state as a string.
      * @return Returns a std::string representation of the current thread state. 
      */
     const std::string GetThreadState() noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        switch (thread_state_) {
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        switch (property_->thread_state) {
             case ThreadState::JOINABLE: return std::string("JOINABLE");
             case ThreadState::DETACHED: return std::string("DETACHED");
-            case ThreadState::FINISHED: return std::string("FINISHED");
-            case ThreadState::UNCREATED: return std::string("UNCREATED");
+            case ThreadState::TERMINATED: return std::string("TERMINATED");
+            case ThreadState::INVALID: return std::string("INVALID");
             default: return std::string("UNKNOWN");
         }
     }
 
     /**
-     * @brief Checks if the thread is joinable.
+     * @brief Checks if the thread is joinable thread-safely.
      * @return true if the thread is joinable, false otherwise.
      */
     bool IsJoinable() const noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        return thread_state_ == ThreadState::JOINABLE;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return property->thread_state == ThreadState::JOINABLE;
     }
 
     /**
-     * @brief Checks if the thread is detached.
+     * @brief Checks if the thread is detached thread-safely.
      * @return true if the thread is detached, false otherwise.
      */
     bool IsDetached() const noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        return thread_state_ == ThreadState::DETACHED;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return property->thread_state == ThreadState::DETACHED;
     }
 
     /**
-     * @brief Sets the action of congzhi::Thread destructor.
+     * @brief Checks if the thread is invalid thread-safely.
+     * @return true if the thread is invalid, false otherwise.
+     */
+    bool IsInvalid () const noexcept {
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock (property->mutex);
+        return property->thread_state == ThreadState::INVALID;
+    }
+
+    /**
+     * @brief Sets the action of congzhi::Thread destructor thread-safely.
      * @param action The DtorAction to set.
      */
     void SetDtorAction(DtorAction action) noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        if (thread_state_ != ThreadState::UNCREATED) {
-            return;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        if (property->thread_state == ThreadState::INVALID || property->thread_state == ThreadState::TERMINATED) {
+            property->dtor_action = action;
         }
-        dtor_action_ = action;
     }
 
     /**
-     * @brief Gets the action of congzhi::Thread destructor.
+     * @brief Gets the action of congzhi::Thread destructor thread-safely.
      * @return The current DtorAction.
      */
     DtorAction GetDtorAction() const noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        return dtor_action_;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return property->dtor_action;
     }
 private:
-    static constexpr ThreadState DefaultThreadState = ThreadState::UNCREATED; // Default thread state.
-    static constexpr DtorAction DefaultDtorAction = DtorAction::DETACH; // Default destructor action.
-
-    pthread_t thread_handle_{0};       // Native thread handle.
-    ThreadState thread_state_{DefaultThreadState};      // Current state of the thread.
-    DtorAction dtor_action_{DefaultDtorAction}; // Action to take on destruction.
-    mutable congzhi::Mutex mutex_;  // A mutable mutex for thread safety(M&M rule).
-
     /**
      * @brief Abstract base class for encapsulating thread task data.
      *
      * Used to store and execute callable objects in a type-erased manner.
      */
     struct ThreadDataBase {
-        congzhi::Thread* thread_;
-
-        explicit ThreadDataBase(congzhi::Thread* thread) : thread_(thread) {}
+        std::weak_ptr<ThreadProperty> property_;
+        explicit ThreadDataBase(std::weak_ptr<ThreadProperty> property) : property_(property) {}
         virtual ~ThreadDataBase() = default;
         virtual void Execute() = 0;
     };
@@ -807,8 +891,11 @@ private:
     template <typename TFunc>
     struct ThreadData : public ThreadDataBase {
         TFunc callable_;
-        ThreadData(TFunc&& func, congzhi::Thread* thread)
-            : ThreadDataBase(thread), callable_(std::forward<TFunc>(func)) {}
+        ThreadData(TFunc&& func, std::weak_ptr<ThreadProperty> property)
+            : ThreadDataBase(property), 
+              callable_(std::forward<TFunc>(func)) {    
+        }
+        
         void Execute() override {
             callable_();
         }
@@ -830,13 +917,14 @@ private:
         } catch (...) {
             // Log or handle exceptions here if needed.
         }
-        if (data->thread_) {
-            congzhi::LockGuard<congzhi::Mutex> lock(data->thread_->mutex_);
-            data->thread_->thread_state_ = ThreadState::FINISHED; // Mark thread as finished.
+
+        // update property if it's not expired
+        if (auto property = data->property_.lock()) {
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            if (property->thread_state == ThreadState::DETACHED) {
+                property->thread_state = ThreadState::TERMINATED;
+            }
         }
-        // Clean up the thread data.
-        data.reset(); // Ensure the thread data is cleaned up.
-        pthread_exit(nullptr); // Exit the thread cleanly.
         return nullptr;
     }
 
@@ -844,50 +932,39 @@ private:
      * @brief Cleanup the current thread based on the destructor action.
      */
     void Cleanup() noexcept {
+        auto property = property_; // keep state alive
+        
         ThreadState current_state;
         DtorAction current_action;
-        pthread_t handle;
+
         {
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        
-            current_state = thread_state_;
-            current_action = dtor_action_;
-            handle = thread_handle_;
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            current_state = property->thread_state;
+            current_action = property->dtor_action;
             
-            if (current_state == ThreadState::UNCREATED || handle == 0) {
-                return; // Nothing to clean up.
-            }
-            if (current_state == ThreadState::FINISHED || current_state == ThreadState::DETACHED) {
-                return; // Already finished or detached, nothing to do.
+            if (current_state == ThreadState::TERMINATED || 
+                current_state == ThreadState::INVALID || 
+                current_state == ThreadState::DETACHED) {
+                return; // Already terminated or detached, nothing to do.
             }
         }
-        
-        switch (current_action) {
-            case DtorAction::JOIN:
-                try {
+        try {
+            switch (current_action) {
+                case DtorAction::JOIN: 
                     Join();
-                } catch (...) {}
-                break;
-            case DtorAction::DETACH:
-                try {
-                    Detach(); // Detach the thread to release resources.
-                }
-                catch (...) {}
-                break;
-            case DtorAction::CANCEL:
-                try{
-                   Cancel(); 
-                }
-                catch(...) {}
-                break;
-            case DtorAction::TERMINATE:
-                try {
+                    break;
+                case DtorAction::DETACH:
+                    Detach();
+                    break;
+                case DtorAction::CANCEL:
+                    Cancel();
+                    break;
+                case DtorAction::TERMINATE:
                     Terminate();
-                }
-                catch (...) {}
-                break;
-            default:
-                break;
+                    break;
+            }
+        } catch (...) {
+            // ignore cleanup errors
         }
     }
 
@@ -912,10 +989,7 @@ public:
     /**
      * @brief Default constructor. Initializes an uncreated thread.
      */
-    Thread() noexcept 
-    : thread_handle_(0),
-      thread_state_(DefaultThreadState),
-      dtor_action_(DefaultDtorAction) {}
+    Thread() noexcept = default;
     
     /**
      * @brief Destructor. Cleans up the thread if joinable.
@@ -934,14 +1008,9 @@ public:
      * @param other Thread to move from.
      */
     Thread(Thread&& other) noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(other.mutex_);
-        thread_handle_ = other.thread_handle_; 
-        thread_state_ = other.thread_state_;
-        dtor_action_ = other.dtor_action_;
-   
-        other.thread_handle_ = 0;
-        other.thread_state_ = DefaultThreadState; // Reset to default state
-        other.dtor_action_ = DefaultDtorAction; // Reset to default action
+        congzhi::LockGuard<congzhi::Mutex> lock(other.property_->mutex);
+        property_ = other.property_;
+        other.property_ = std::make_shared<ThreadProperty>();    
     }
     
     /**
@@ -951,18 +1020,11 @@ public:
      */
     Thread& operator=(Thread&& other) noexcept {
         if (this != &other) {
-            if (thread_state_ != ThreadState::UNCREATED) {
-                Cleanup(); // Clean up current thread before moving
-            }
+            Cleanup(); // Clean up current thread before moving    
 
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);            
-            thread_handle_ = other.thread_handle_;
-            thread_state_ = other.thread_state_;
-            dtor_action_ = other.dtor_action_;
-
-            other.thread_handle_ = 0;
-            other.thread_state_ = DefaultThreadState; // Reset to default state
-            other.dtor_action_ = DefaultDtorAction; // Reset to default action
+            congzhi::LockGuard<congzhi::Mutex> lock(other.property_->mutex);            
+            property_ = other.property_;
+            other.property_ = std::make_shared<ThreadProperty>();
         }
         return *this;
     }
@@ -981,12 +1043,17 @@ public:
     template <typename TFunc, typename... TArgs>
     void Start(TFunc&& f, TArgs&&... args, 
                DtorAction dtor_action = DefaultDtorAction,
-               const ThreadAttribute& attr = ThreadAttribute()) {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        if (thread_state_ != DefaultThreadState) {
-            throw std::logic_error("Thread is already started");
+               const ThreadAttribute& attr = ThreadAttribute()) 
+    {
+        auto property = property_;    
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+
+        // you cannot restart a running thread
+        if (property->thread_state == ThreadState::JOINABLE ||
+            property->thread_state == ThreadState::DETACHED) {
+            throw std::logic_error("Thread is already running");
         }
-        
+
         //auto bound_task = std::bind(std::forward<TFunc>(f), std::forward<TArgs>(args)...);
         auto bound_task = [func = std::forward<TFunc>(f), 
                           tup = std::make_tuple(std::forward<TArgs>(args)...)]() mutable {
@@ -994,20 +1061,22 @@ public:
         };
         
         using task_type = decltype(bound_task);
-        auto data = new ThreadData<task_type>(std::move(bound_task), this);
-        
+        auto data = new ThreadData<task_type>(std::move(bound_task), property_);
+    
         const int res = pthread_create(
-            &thread_handle_, 
+            &property->thread_handle, 
             attr.NativeHandle(), 
             &ThreadEntry, 
             static_cast<void*>(data)
         );
+
         if (res != 0) {
             delete data;
             throw std::runtime_error("pthread_create failed: " + std::string(strerror(res)));
         }
-        thread_state_ = ThreadState::JOINABLE;
-        dtor_action_ = dtor_action; // Set the destructor action
+    
+        property->thread_state = ThreadState::JOINABLE;
+        property->dtor_action = dtor_action; // Set the destructor action
     }
     
     /**
@@ -1015,8 +1084,9 @@ public:
      * @return pthread_t ID if joinable, otherwise 0.
      */
     pthread_t GetId() const noexcept {
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        return (thread_state_ == ThreadState::JOINABLE) ? thread_handle_ : 0;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return (property->thread_state == ThreadState::JOINABLE) ? property->thread_handle : 0;
     }
 
     /**
@@ -1025,7 +1095,9 @@ public:
      * @warning Direct manipulation of the native handle is discouraged, which may break RAII guarantees.
      */
     pthread_t* NativeHandle() noexcept {
-        return (thread_state_ == ThreadState::JOINABLE) ? &thread_handle_ : nullptr;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return (property->thread_state == ThreadState::JOINABLE) ? &property->thread_handle : nullptr;
     }
 
     /**
@@ -1033,7 +1105,9 @@ public:
      * @return Const pointer to pthread_t if joinable, otherwise nullptr.
      */
     const pthread_t* NativeHandle() const noexcept {
-        return (thread_state_ == ThreadState::JOINABLE) ? &thread_handle_ : nullptr;
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return (property->thread_state == ThreadState::JOINABLE) ? &property->thread_handle : nullptr;
     }
 
     /**
@@ -1051,20 +1125,25 @@ public:
      * @throws std::runtime_error if join fails.
      */
     void Join() {
+        auto property = property_;
         pthread_t handle;
         {
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-            if (thread_state_ != ThreadState::JOINABLE) {
+            // only JOINABLE state can join
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            if (property->thread_state != ThreadState::JOINABLE) {
                 throw std::logic_error("Thread not joinable");
             }
-            handle = thread_handle_;
+            if (property->dtor_action == DtorAction::DETACH) {
+                throw std::logic_error("Thread not joinable (DETACH dtor action)");
+            }
+            handle = property->thread_handle;
         }
         const int res = pthread_join(handle, nullptr);
         if (res != 0) {
             throw std::runtime_error("pthread_join failed: " + std::string(strerror(res)));
         }
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        thread_state_ = ThreadState::FINISHED;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        property->thread_state = ThreadState::TERMINATED;
     }
     
     /**
@@ -1073,20 +1152,22 @@ public:
      * @throws std::runtime_error if detach fails.
      */
     void Detach() {
+        auto property = property_;
         pthread_t handle;
         {
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-            if (thread_state_ != ThreadState::JOINABLE) {
-                throw std::logic_error("Thread not joinable");
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            if (property->thread_state != ThreadState::JOINABLE) {
+                throw std::logic_error("Thread not detachable");
             }
-            handle = thread_handle_;
+            handle = property->thread_handle;
         }
+
         const int res = pthread_detach(handle);
         if (res != 0) {
             throw std::runtime_error("pthread_detach failed: " + std::string(strerror(res)));
         }
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        thread_state_ = ThreadState::DETACHED;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        property->thread_state = ThreadState::DETACHED;
     }
 
     /**
@@ -1095,93 +1176,115 @@ public:
      * @throws std::runtime_error if cancel fails.
      */
     void Cancel() {
+        auto property = property_;
         pthread_t handle;
         {
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-            if (thread_state_ != ThreadState::JOINABLE && thread_state_ != ThreadState::DETACHED) {
-                throw std::logic_error("Thread not joinable");
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            if (property->thread_state != ThreadState::JOINABLE &&
+                property->thread_state != ThreadState::DETACHED) {
+                throw std::logic_error("Thread not cancelable");
             }
-            handle = thread_handle_;
+            handle = property->thread_handle;
         }
         const int cancel_res = pthread_cancel(handle);
         if (cancel_res != 0) {
             throw std::runtime_error("pthread_cancel failed: " + std::string(strerror(cancel_res)));
         }
-        const int join_res = pthread_join(handle, nullptr);
-        if (join_res != 0) {
-            throw std::runtime_error("pthread_join after cancel failed: " + std::string(strerror(join_res)));
+
+        // only when joinable
+        if (property->thread_state == ThreadState::JOINABLE) {
+            const int join_res = pthread_join(handle, nullptr);
+            if (join_res != 0) {
+                throw std::runtime_error("pthread_join after cancel failed: " + std::string(strerror(join_res)));
+            }
         }
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        thread_state_ = ThreadState::FINISHED;
+        
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        property->thread_state = ThreadState::TERMINATED;
     }
 
     /**
-     * @brief Terminates the thread execution. And update the thread state.
-     * @throws std::logic_error if thread is not created.
-     * @throws std::runtime_error if terminate fails.
+     * @brief Terminates the thread execution gracefully and updates the thread state.
+     * @throws std::logic_error if the thread is not running.
+     * @throws std::runtime_error if termination fails.
+     * @note This method sends a SIGTERM signal to the thread using pthread_kill.
+     *       The target thread should register a signal handler for SIGTERM to handle graceful termination.
+     *       If the thread does not handle SIGTERM, the default behavior may terminate the thread,
+     *       but it will not terminate the entire process unless the signal is unhandled and critical.
      */
     void Terminate() {
+        auto property = property_;
         pthread_t handle;
         {
-            congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-            if (thread_state_ != ThreadState::JOINABLE && thread_state_ != ThreadState::DETACHED) {
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            if (property->thread_state != ThreadState::JOINABLE &&
+                property->thread_state != ThreadState::DETACHED) {
                 throw std::logic_error("Thread not running, cannot terminate");
             }
-            handle = thread_handle_;
+            handle = property->thread_handle;
         }
 
-        // First try SIGTERM to terminate the thread gracefully.
         const int term_res = pthread_kill(handle, SIGTERM);
         if (term_res != 0) {
             if (term_res == ESRCH) {
-                throw std::logic_error("Thread already terminated");
-                congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-                thread_state_ = ThreadState::FINISHED; // Mark as finished if already terminated.
+                throw std::logic_error("Thread already dead");
             }
             throw std::runtime_error("pthread_kill (SIGTERM) failed: " + std::string(strerror(term_res)));
         }
 
-        // Wait for 100ms to see if the thread terminates gracefully.
-        // if it's still running, we can forcefully terminate it.
-        sigset_t sigset;
-        sigemptyset(&sigset);
-        sigaddset(&sigset, SIGCHLD); // wait for child thread termination signal
-
-        sigset_t oldset;
-        pthread_sigmask(SIG_BLOCK, &sigset, &oldset); // Block SIGCHLD in this thread, this thread would be blocked in sigtimedwait
-
-        struct timespec ts = {0, 100 * 1'000'000}; // 100 milliseconds
-        bool terminated = false;
-        int sigwait_res = sigtimedwait(&sigset, nullptr, &ts);
-        if (sigwait_res == SIGCHLD) {
-            terminated = true; // Thread terminated gracefully
-        } else if (sigwait_res == -1 && errno != EAGAIN && errno != EINTR) {
-            pthread_sigmask(SIG_SETMASK, &oldset, nullptr); // Restore old signal mask
-            throw std::runtime_error("sigtimedwait failed: " + std::string(strerror(errno)));
-        }
-        pthread_sigmask(SIG_SETMASK, &oldset, nullptr); // Restore old signal mask
-
-        if (!terminated) {
-            // Forcefully terminate the thread using SIGKILL
-            const int kill_res = pthread_kill(handle, SIGKILL);
-            if (kill_res != 0) {
-                if (kill_res == ESRCH) {
-                    throw std::logic_error("Thread already terminated");
-                    congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-                    thread_state_ = ThreadState::FINISHED; // Mark as finished if already terminated.
+        if (property->thread_state == ThreadState::JOINABLE) {
+            #ifdef __APPLE__
+            constexpr int max_retries = 10;
+            constexpr struct timespec delay = {0, 10'000'000}; // 10ms
+            
+            for (int i = 0; i < max_retries; i++) {
+                int res = pthread_kill(handle, 0);
+                
+                if (res == ESRCH) {
+                    // thread's dead
+                    congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+                    property->thread_state = ThreadState::TERMINATED;
+                    return;
                 }
-                throw std::runtime_error("pthread_kill (SIGKILL) failed: " + std::string(strerror(kill_res)));
+                nanosleep(&delay, nullptr);
             }
-        }
-        
-        // Wait for the thread to terminate and clean up resources.
-        const int join_res = pthread_join(handle, nullptr);
-        if (join_res != 0) {
-            throw std::runtime_error("pthread_join after terminate failed: " + std::string(strerror(join_res)));
-        }
+            
+            #endif
 
-        congzhi::LockGuard<congzhi::Mutex> lock(mutex_);
-        thread_state_ = ThreadState::FINISHED;
+            // macOS do not support pthread_tryjoin_np()
+            #ifdef __linux__
+            // Wait for the thread to finish after sending SIGTERM.
+            constexpr int max_retries = 10;
+            constexpr struct timespec delay = {0, 10'000'000}; // 10ms
+            for (int i = 0; i < max_retries; i++) {
+                int join_res = pthread_tryjoin_np(handle, nullptr);
+                if (join_res == 0) {
+                    congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+                    property->thread_state = ThreadState::TERMINATED;
+                    return;
+                } else if (join_res != EBUSY) {
+                    // non-busy error
+                    break;
+                }
+                nanosleep(&delay, nullptr);
+            }
+            #endif
+        
+            const int join_res = pthread_join(handle, nullptr);
+            if (join_res != 0) {
+                if (join_res == ESRCH) {
+                    congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+                    property->thread_state = ThreadState::TERMINATED;
+                }
+                throw std::runtime_error("pthread_join after SIGTERM failed: " + std::string(strerror(join_res)));
+            }
+                congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+                property->thread_state = ThreadState::TERMINATED;
+        } else {
+            // detach state
+            congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+            property->thread_state = ThreadState::TERMINATED;
+        }    
     }
 
     /**
@@ -1192,17 +1295,7 @@ public:
         if (this == &other) {
             return;
         }
-        // Use branchless programming to avoid deadlocks.
-        // Ensure that the mutexes are locked in a consistent order to prevent deadlocks.
-        Thread* threads[2] = { &other, this };
-        auto first = threads[bool(this < &other)];
-        auto second = threads[!bool(this < &other)];
-
-        congzhi::LockGuard<congzhi::Mutex> lock1(first->mutex_);
-        congzhi::LockGuard<congzhi::Mutex> lock2(second->mutex_);
-        std::swap(thread_handle_, other.thread_handle_);
-        std::swap(thread_state_, other.thread_state_);
-        std::swap(dtor_action_, other.dtor_action_);
+        std::swap(property_, other.property_);
     }
 
     /**
