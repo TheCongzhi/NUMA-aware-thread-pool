@@ -286,8 +286,8 @@ public:
  * @brief Enum representing the status of a wait operation in class ConditionVarible.
  */
 enum class WaitStatus {
-    NoTimeout, // Wait completed without timeout.
-    Timeout    // Wait timed out.
+    NoTimeout, ///< Wait completed without timeout.
+    Timeout    ///< Wait timed out.
 };
 
 /**
@@ -299,20 +299,70 @@ enum class WaitStatus {
 class ConditionVariable {
 private:
     pthread_cond_t cond_handle_;
+
+    #ifdef __linux__
+    static constexpr clockid_t clock_type = CLOCK_MONOTONIC;
+    using InternalrClock = std::chrono::steady_clock;
+    #else // __APPLE__ OSX has some buggy features to MONOTONIC
+    static constexpr clockid_t clock_type = CLOCK_REALTIME;
+    using InternalClock = std::chrono::system_clock;
+    #endif
+
+    /**
+     * @brief Get the current time point using the cv's clock.
+     * @return timespec representing current time point.
+     */
+    static timespec Now() noexcept {
+        timespec ts;
+        clock_gettime(clock_type, &ts);
+        return ts;
+    }
+
+    /**
+     * @brief Waits on the condition variable until it is signaled or the specified absolute timeout expires.
+     * @param mtx Reference to the Mutex object associated with the condition variable.
+     * @param abs_time The absolute timeout (as a timespec) specifying the maximum time to wait.
+     * @return WaitStatus::NoTimeout if signaled, WaitStatus::Timeout if the timeout expires.
+     * @throws std::runtime_error if pthread_cond_timedwait fails for reasons other than timeout.
+     */
+    WaitStatus TimedWait(Mutex& mtx, const timespec& abs_time) {
+        const int res = pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &abs_time);
+        if (res == 0) {
+            return WaitStatus::NoTimeout;
+        } else if (res == ETIMEDOUT) {
+            return WaitStatus::Timeout;
+        } else {
+            throw std::runtime_error("pthread_cond_timedwait failed: " + std::string(strerror(res)));
+        }
+    }
+
 public:
-    
     /**
      * @brief Constructs and initializes the condition variable.
      * @throws std::runtime_error if initialization fails.
      */
     ConditionVariable() {
+        #ifdef __linux__
         pthread_condattr_t attr;
-        pthread_condattr_init(&attr);
-
-        const int res = pthread_cond_init(&cond_handle_, nullptr); 
-        if (res != 0) {
-            throw std::runtime_error("pthread_cond_init failed: " + std::string(strerror(res)));
+        const int clock_res = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        if (clock_res != 0) {
+            pthread_condattr_destroy(&attr);
+            throw std::runtime_error("pthread_condattr_setclock failed: " + std::string(strerror(clock_res)));
         }
+        
+        const int init_res = pthread_cond_init(&cond_handle_, &attr); 
+        pthread_condattr_destroy(&attr);
+        if (init_res != 0) {
+            throw std::runtime_error("pthread_cond_init failed: " + std::string(strerror(init_res)));
+        }
+        #endif
+
+        #ifdef __APPLE__
+        const int init_res = pthread_cond_init(&cond_handle_, nullptr);
+        if (init_res != 0) {
+            throw std::runtime_error("pthread_cond_init failed: " + std::string(strerror(init_res)));
+        }
+        #endif
     }
 
     /**
@@ -333,6 +383,7 @@ public:
 
     /**
      * @brief Waits for notification using the given mutex.
+     * 
      * Atomically unlocks the mutex and blocks until notified.
      * Reacquires the mutex before returning.
      * 
@@ -348,7 +399,6 @@ public:
 
     /**
      * @brief Waits until the predicate returns true.
-     * Equivalent to: while(!pred()) wait(mtx);
      *
      * @tparam Predicate A callable returning bool.
      * @param mtx Mutex to unlock while waiting.
@@ -358,16 +408,13 @@ public:
     template <typename Predicate>
     void Wait(Mutex& mtx, Predicate pred) {
         while (!pred()) {
-            const int res = pthread_cond_wait(&cond_handle_, mtx.NativeHandle());
-            if (res != 0) {
-                throw std::runtime_error("pthread_cond_wait failed with predicate: " + std::string(strerror(res)));
-            }
+            Wait(mtx);        
         }
     }
 
     /**
      * @brief Waits for notification or timeout.
-     * Uses CLOCK_MONOTONIC to avoid issues with system clock changes.
+     * Uses CLOCK_MONOTONIC (Linux) or CLOCK_REALTIME (macOS) to avoid system clock issues.
      * 
      * @tparam Rep Duration representation.
      * @tparam Period Duration period.
@@ -378,27 +425,7 @@ public:
      */
     template <typename Rep, typename Period>
     WaitStatus WaitFor(Mutex& mtx, const std::chrono::duration<Rep, Period>& rel_time) {
-        struct timespec ts; // Time specification for timeout
-        clock_gettime(CLOCK_MONOTONIC, &ts); // Get the current time
-        
-        auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(rel_time).count();
-        ts.tv_sec += nanoseconds / 1'000'000'000;
-        ts.tv_nsec += nanoseconds % 1'000'000'000;
-        
-        // Handle overflow of nanoseconds
-        if (ts.tv_nsec >= 1'000'000'000) {
-            ts.tv_sec += ts.tv_nsec / 1'000'000'000;
-            ts.tv_nsec %= 1'000'000'000;
-        }
-
-        const int res = pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &ts);
-        if (res == 0) {
-            return WaitStatus::NoTimeout; // everything is fine
-        } else if (res == ETIMEDOUT) {
-            return WaitStatus::Timeout; // timed out
-        } else {
-            throw std::runtime_error("pthread_cond_timedwait failed: " + std::string(strerror(res)));
-        }
+        return WaitUntil(mtx, InternalClock::now() + rel_time);
     }
 
     /**
@@ -414,49 +441,36 @@ public:
      */
     template <typename Predicate, typename Rep, typename Period>
     WaitStatus WaitFor(Mutex& mtx, Predicate pred, const std::chrono::duration<Rep, Period>& rel_time) {
-        while (!pred()) {
-            auto status = WaitFor(mtx, rel_time);
-            if (status == WaitStatus::Timeout) {
-                return status; // timed out exit
-            }
-        }
-        return WaitStatus::NoTimeout;
+        return WaitUntil(mtx, pred, InternalClock::now() + rel_time);    
     }
 
     /**
      * @brief Waits until a specific time point or until notified.
-     * @tparam Clock Clock type.
+     * @note The time point must be based on the same clock as the condition variable:
+     *       std::chrono::steady_clock on Linux, std::chrono::system_clock on macOS.
      * @tparam Duration Duration type of the time point.
      * @param mtx Mutex to unlock while waiting.
      * @param abs_time Absolute time point to wait until.
      * @return WaitStatus indicating if time's out or not.
      * @throws std::runtime_error if wait fails.
      */
-    template <typename Clock, typename Duration>
-    WaitStatus WaitUntil(Mutex& mtx, const std::chrono::time_point<Clock, Duration>& abs_time) {
+    template <typename Duration>
+    WaitStatus WaitUntil(Mutex& mtx, const std::chrono::time_point<InternalClock, Duration>& abs_time) {
         // Convert the time point to timespec
         auto time_since_epoch = abs_time.time_since_epoch();
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch).count();
-        auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(time_since_epoch).count() % 1'000'000'000;
+        auto sec = std::chrono::duration_cast<std::chrono::seconds>(time_since_epoch);
+        auto nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(time_since_epoch) % 1'000'000'000;
         
         struct timespec ts;
-        ts.tv_sec = static_cast<time_t>(seconds);
-        ts.tv_nsec = static_cast<long>(nanoseconds);
+        ts.tv_sec = static_cast<time_t>(sec);
+        ts.tv_nsec = static_cast<long>(nsec);
         
-        const int res = pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &ts);
-        if (res == 0) {
-            return WaitStatus::NoTimeout; // everything is fine
-        } else if (res == ETIMEDOUT) {
-            return WaitStatus::Timeout; // timed out
-        } else {
-            throw std::runtime_error("pthread_cond_timedwait failed(wait until): " + std::string(strerror(res)));
-        }
+        return TimedWait(mtx, ts);
     }
 
     /**
      * @brief Waits until predicate returns true or timeout.
      * @tparam Predicate A callable returning bool.
-     * @tparam Clock Clock type.
      * @tparam Duration Duration type.
      * @param mtx Mutex to unlock while waiting.
      * @param pred Predicate to evaluate.
@@ -464,12 +478,12 @@ public:
      * @return WaitStatus indicating if time's out or not.
      * @throws std::runtime_error if wait fails.
      */
-    template <typename Predicate, typename Clock, typename Duration>
-    WaitStatus WaitUntil(Mutex& mtx, Predicate pred, const std::chrono::time_point<Clock, Duration>& abs_time) {
+    template <typename Predicate, typename Duration>
+    WaitStatus WaitUntil(Mutex& mtx, Predicate pred, const std::chrono::time_point<InternalClock, Duration>& abs_time) {
         while (!pred()) {
             auto status = WaitUntil(mtx, abs_time);
             if (status == WaitStatus::Timeout) {
-                return status; // timed out exit
+                return pred() ? WaitStatus::NoTimeout : WaitStatus::Timeout;
             }
         }
         return WaitStatus::NoTimeout;
@@ -760,21 +774,34 @@ enum class ThreadState {
     TERMINATED, // Thread is terminated.
     INVALID     // Thread has not been created or is in an invalid state.
 };
-// The state machine behaves like as follows:
-//                 _______________
-//                ⬇              ⬆
-//                ⬇              ⬆
-// INVALID---->JOINABLE----->TERMINATED
-//               ⬆ ⬇            ⬆
-//               ⬆ ⬇            ⬆
-//             DETACHED-----------/
+
+/*
+ * Thread State Machine:
+ *
+ *                +-----------+
+ *                |  INVALID  |
+ *                +-----------+
+ *                      |
+ *                      | Start();
+ *                      v
+ *                +------------+
+ *                |  JOINABLE  | <-----、
+ *                +------------+        \
+ *                /            \         |
+ *       Detach()/              \ Join() | Start()
+ *              /                \       |
+ *             v                  v      |
+ *      +------------+        +------------+
+ *      |  DETACHED  | -----> | TERMINATED |
+ *      +------------+        +------------+
+ */
 
 /**
  * @brief Enum representing the action to take on thread destruction.
  */
 enum class DtorAction {
     JOIN,      // Join the thread on destruction. JOINABLE -> TERMINATED
-    DETACH,    // Detach the thread on destruction. JOINABLE -> DETACHED -> TERMINATED
+    DETACH,    // Detach the thread on destruction. JOINABLE -> DETACHED
     CANCEL,    // Request thread cancellation on destruction. JOINABLE/DETACHED -> TERMINATED
     TERMINATE  // Terminate the thread on destruction. JOINABLE/DETACHED -> TERMINATED
 };
@@ -795,6 +822,7 @@ private:
         ThreadState thread_state {DefaultThreadState}; // Current state of the thread.
         DtorAction dtor_action {DefaultDtorAction}; // Action to take on destruction.
         mutable congzhi::Mutex mutex; // A mutable mutex for thread safety(M&M rule).
+        bool is_complete{false};
     };
     
     std::shared_ptr<ThreadProperty> property_ = std::make_shared<ThreadProperty>();
@@ -817,6 +845,16 @@ public:
             case ThreadState::INVALID: return std::string("INVALID");
             default: return std::string("UNKNOWN");
         }
+    }
+
+    /**
+     * @brief Checks if the thread is finishes its job.
+     * @return true if the thread finishes the jon, false otherwise.
+     */
+    bool IsCompleteExecution() const noexcept {
+        auto property = property_;
+        congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
+        return property->is_complete;
     }
 
     /**
@@ -924,6 +962,8 @@ private:
             if (property->thread_state == ThreadState::DETACHED) {
                 property->thread_state = ThreadState::TERMINATED;
             }
+            property->is_complete = true;
+        } else {
         }
         return nullptr;
     }
@@ -1167,7 +1207,7 @@ public:
             throw std::runtime_error("pthread_detach failed: " + std::string(strerror(res)));
         }
         congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
-        property->thread_state = ThreadState::DETACHED;
+        property->thread_state = property->is_complete ? ThreadState::TERMINATED : ThreadState::DETACHED;
     }
 
     /**
@@ -1325,7 +1365,7 @@ namespace this_thread {
     }
 
     /**
-     * @brief Sleeps for a specified duration in milliseconds.
+     * @brief Sleeps for a specified duration.
      * @tparam Rep Duration representation type.
      * @tparam Period Duration period type.
      * @param sleep_duration Duration to sleep, specified in milliseconds.
@@ -1366,11 +1406,26 @@ namespace this_thread {
     }
 
     /**
+     * @brief Sleeps for a specified duration in milliseconds.
+     * @param ms Duration to sleep in milliseconds.
+     * @throws std::invalid_argument if ms is negative.
+     * @throws std::runtime_error if nanosleep fails.
+     */
+    void SleepFor(int ms) {
+        if (ms < 0) {
+            throw std::invalid_argument("Sleep duration cannot be negative");
+        }
+        SleepFor(std::chrono::milliseconds(ms));
+    }
+
+    /**
      * @brief Sleeps until a specific time point.
      * @tparam Clock Clock type.
      * @tparam Duration Duration type of the time point.
      * @param abs_time Absolute time point to sleep until.
      * @throws std::invalid_argument if abs_time is in the past.
+     * @throws std::runtime_error if nanosleep fails.
+     * @note Absolute time only sopported on Linux.
      */
     template <typename Clock, typename Duration>
     void SleepUntil(const std::chrono::time_point<Clock, Duration>& abs_time) {
@@ -1379,8 +1434,39 @@ namespace this_thread {
             return; // No need to sleep, the time point is in the past
         }
         
-        auto sleep_duration = abs_time - now;
-        SleepFor(sleep_duration);
+        auto sys_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            abs_time - now + std::chrono::system_clock::now()
+        );
+
+        #ifdef __linux__
+            // the time duration from now to 1st, January, 1970
+            auto duration_since_epoch = sys_time.time_since_epoch();
+            auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration_since_epoch);
+            auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(duration_since_epoch - seconds);
+
+            struct timespec ts;
+            ts.tv_sec = seconds;
+            ts.tv_nsec = nanoseconds;
+
+            int res = clock_nanosleep(CLOCK_REALTIME, TIME_ABSTIME, &ts, nullptr);
+
+            if (res != 0) {
+                if (res = EINTR) {
+                    return;
+                }
+                throw std::runtime_error("clock_nanosleep failed: " + std::string(strerror(res)));
+            }
+        #endif
+        
+        // NOT SAFE, use relative time here
+        #ifdef __APPLE__
+        auto now_sys = std::chrono::system_clock::now();
+        if (sys_time > now_sys) {
+            auto rel_time = sys_time - now_sys;
+            SleepFor(rel_time);
+        }
+        return;
+        #endif
     }
 } // namespace this_thread
 } // namespace congzhi
