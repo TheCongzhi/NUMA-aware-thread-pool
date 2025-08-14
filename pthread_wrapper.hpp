@@ -39,8 +39,8 @@ namespace congzhi {
  * @brief Mutex types supported by the implementation.
  */
 enum class MutexType {
-    Default, // Default mutex type.
-    Recursive, // Recursive mutex type.
+    DEFAULT, // Default mutex type.
+    RECURSIVE, // Recursive mutex type.
     // Error checking mutex type.
 };
 
@@ -59,14 +59,14 @@ public:
      * @param type The type of mutex to create.
      * @throws std::runtime_error if initialization fails.
      */
-    explicit Mutex(MutexType type = MutexType::Default) {
+    explicit Mutex(MutexType type = MutexType::DEFAULT) {
         pthread_mutexattr_t attr;
         const int res = pthread_mutexattr_init(&attr);
         if (res != 0) {
             throw std::runtime_error("pthread_mutex_init failed: " + std::string(strerror(res)));
         }
 
-        int mutex_type = (type == MutexType::Recursive) ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_DEFAULT;
+        int mutex_type = (type == MutexType::RECURSIVE) ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_DEFAULT;
         const int res2 = pthread_mutexattr_settype(&attr, mutex_type);
         const int res3 = pthread_mutex_init(&mutex_handle_, &attr);
         int err = (res2 != 0) ? res2 : res3;
@@ -286,8 +286,8 @@ public:
  * @brief Enum representing the status of a wait operation in class ConditionVarible.
  */
 enum class WaitStatus {
-    NoTimeout, ///< Wait completed without timeout.
-    Timeout    ///< Wait timed out.
+    NONTIMEOUT, ///< Wait completed without timeout.
+    TIMEOUT    ///< Wait timed out.
 };
 
 /**
@@ -322,15 +322,15 @@ private:
      * @brief Waits on the condition variable until it is signaled or the specified absolute timeout expires.
      * @param mtx Reference to the Mutex object associated with the condition variable.
      * @param abs_time The absolute timeout (as a timespec) specifying the maximum time to wait.
-     * @return WaitStatus::NoTimeout if signaled, WaitStatus::Timeout if the timeout expires.
+     * @return WaitStatus::NONTIMEOUT if signaled, WaitStatus::TIMEOUT if the timeout expires.
      * @throws std::runtime_error if pthread_cond_timedwait fails for reasons other than timeout.
      */
     WaitStatus TimedWait(Mutex& mtx, const timespec& abs_time) {
         const int res = pthread_cond_timedwait(&cond_handle_, mtx.NativeHandle(), &abs_time);
         if (res == 0) {
-            return WaitStatus::NoTimeout;
+            return WaitStatus::NONTIMEOUT;
         } else if (res == ETIMEDOUT) {
-            return WaitStatus::Timeout;
+            return WaitStatus::TIMEOUT;
         } else {
             throw std::runtime_error("pthread_cond_timedwait failed: " + std::string(strerror(res)));
         }
@@ -482,11 +482,11 @@ public:
     WaitStatus WaitUntil(Mutex& mtx, Predicate pred, const std::chrono::time_point<InternalClock, Duration>& abs_time) {
         while (!pred()) {
             auto status = WaitUntil(mtx, abs_time);
-            if (status == WaitStatus::Timeout) {
-                return pred() ? WaitStatus::NoTimeout : WaitStatus::Timeout;
+            if (status == WaitStatus::TIMEOUT) {
+                return pred() ? WaitStatus::NONTIMEOUT : WaitStatus::TIMEOUT;
             }
         }
-        return WaitStatus::NoTimeout;
+        return WaitStatus::NONTIMEOUT;
     }
 
     /**
@@ -525,16 +525,16 @@ public:
  * @brief Enum representing the scope of threads.
  */
 enum class Scope {
-    Process, // Process scope. The CPU race is happening within a single process.
-    System   // System scope. The CPU race is happening across all threads in the system.
+    PROCESS, // Process scope. The CPU race is happening within a single process.
+    SYSTEM   // SYSTEM scope. The CPU race is happening across all threads in the system.
 };
 
 /**
  * @brief Enum representing the detach state of threads.
  */
 enum class DetachState {
-    Joinable, // Thread is joinable and can be waited on.
-    Detached   // Thread is detached and cannot be waited on (pthread_join invalid).
+    JOINABLE, // Thread is joinable and can be waited on.
+    DETACHED   // Thread is detached and cannot be waited on (pthread_join invalid).
 };
 
 /**
@@ -546,7 +546,7 @@ enum class DetachState {
  * - SCHED_RR: Platform specific.
  */
 enum class SchedulingPolicy {
-    Default, // Default scheduling policy (Completely Fair Scheduler for Linux and Core Foundation Scheduler for macOS).
+    DEFAULT, // Default scheduling policy (Completely Fair Scheduler for Linux and Core Foundation Scheduler for macOS).
     FIFO,    // First In First Out scheduling policy.
     RR // Round Robin scheduling policy.
 };
@@ -614,14 +614,14 @@ public:
 
     /**
      * @brief Sets the scheduling policy and priority for threads created with these attributes.
-     * @param policy The scheduling policy to set (default is SchedulingPolicy::Default, which is SCHED_OTHER).
+     * @param policy The scheduling policy to set (default is SchedulingPolicy::DEFAULT, which is SCHED_OTHER).
      * @param priority The priority level (default is 0).
      * @throws std::runtime_error if setting scheduling policy or priority fails.
      */
-    void SetSchedulingPolicy(SchedulingPolicy policy = SchedulingPolicy::Default, int priority = 0) {
+    void SetSchedulingPolicy(SchedulingPolicy policy = SchedulingPolicy::DEFAULT, int priority = 0) {
         int policy_value;
         switch (policy) {
-            case SchedulingPolicy::Default: {
+            case SchedulingPolicy::DEFAULT: {
                 policy_value = SCHED_OTHER; // Default scheduling policy
                 const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
                 if (res != 0) {
@@ -685,7 +685,7 @@ public:
             throw std::runtime_error("pthread_attr_getschedpolicy failed: " + std::string(strerror(res)));
         }
         switch (policy) {
-            case SCHED_OTHER: return SchedulingPolicy::Default;
+            case SCHED_OTHER: return SchedulingPolicy::DEFAULT;
             case SCHED_FIFO: return SchedulingPolicy::FIFO;
             case SCHED_RR: return SchedulingPolicy::RR;
             default: throw std::runtime_error("Unknown scheduling policy");
@@ -694,12 +694,12 @@ public:
 
     /**
      * @brief Sets the scope of threads created with these attributes.
-     * @param scope The scope to set (Process or System).
-     * @note Process scope may not be supported on most systems.
+     * @param scope The scope to set (PROCESS or SYSTEM).
+     * @note PROCESS scope may not be supported on most systems.
      * @throws std::runtime_error if setting scope fails.
      */
     void SetScope(Scope scope) {
-        int scope_value = (scope == Scope::Process) ? PTHREAD_SCOPE_PROCESS : PTHREAD_SCOPE_SYSTEM;
+        int scope_value = (scope == Scope::PROCESS) ? PTHREAD_SCOPE_PROCESS : PTHREAD_SCOPE_SYSTEM;
         const int res = pthread_attr_setscope(&attr_handle_, scope_value);
         if (res != 0) {
             throw std::runtime_error("pthread_attr_setscope failed: " + std::string(strerror(res)));
@@ -708,7 +708,7 @@ public:
 
     /**
      * @brief Gets the scope of threads created with these attributes.
-     * @return The scope (Process or System).
+     * @return The scope (PROCESS or SYSTEM).
      * @throws std::runtime_error if getting scope fails.
      */
     Scope GetScope() const {
@@ -717,16 +717,16 @@ public:
         if (res != 0) {
             throw std::runtime_error("pthread_attr_getscope failed: " + std::string(strerror(res)));
         }
-        return (scope_value == PTHREAD_SCOPE_PROCESS) ? Scope::Process : Scope::System;
+        return (scope_value == PTHREAD_SCOPE_PROCESS) ? Scope::PROCESS : Scope::SYSTEM;
     }
 
     /** 
      * @brief Sets the detach state of threads created with these attributes.
-     * @param detached DetachState indicating whether the thread is joinable or detached (Joinable in default).
+     * @param detached DetachState indicating whether the thread is joinable or detached (JOINABLE in default).
      * @throws std::runtime_error if setting detach state fails.
      */
-    void SetDetachState(DetachState detached = DetachState::Joinable) {
-        int detach_state = (detached == DetachState::Detached) ? PTHREAD_CREATE_DETACHED : PTHREAD_CREATE_JOINABLE;
+    void SetDetachState(DetachState detached = DetachState::JOINABLE) {
+        int detach_state = (detached == DetachState::DETACHED) ? PTHREAD_CREATE_DETACHED : PTHREAD_CREATE_JOINABLE;
         const int res = pthread_attr_setdetachstate(&attr_handle_, detach_state);
         if (res != 0) {
             throw std::runtime_error("pthread_attr_setdetachstate failed: " + std::string(strerror(res)));
@@ -744,7 +744,7 @@ public:
         if (res != 0) {
             throw std::runtime_error("pthread_attr_getdetachstate failed: " + std::string(strerror(res)));
         }
-        return (detach_state == PTHREAD_CREATE_DETACHED) ? DetachState::Detached : DetachState::Joinable;
+        return (detach_state == PTHREAD_CREATE_DETACHED) ? DetachState::DETACHED : DetachState::JOINABLE;
     }
 
     /**
