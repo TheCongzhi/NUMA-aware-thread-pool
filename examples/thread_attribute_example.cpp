@@ -5,9 +5,9 @@ int main() {
     congzhi::ThreadAttribute attr;
 
     attr.SetStackSize(4 * 1024 * 1024);
-    attr.SetScope(congzhi::Scope::System);
-    attr.SetDetachState(congzhi::DetachState::Joinable);
-    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::Default, 0);
+    attr.SetScope(congzhi::Scope::SYSTEM);
+    attr.SetDetachState(congzhi::DetachState::JOINABLE);
+    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::DEFAULT, 0);
     std::cout << "Thread attributes set successfully." << std::endl;
 
     congzhi::Thread t1(
@@ -16,9 +16,9 @@ int main() {
             std::cout << "Thread is running with custom attributes." << std::endl;
             std::cout << "Thread ID: " << pthread_self() << std::endl;
             std::cout << "Thread stack size:" << attr.GetStackSize() << std::endl;
-            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "System" : "Process") << std::endl;
-            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "Detached" : "Joinable") << std::endl;
-            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "Default" : "Custom") << std::endl;
+            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::SYSTEM ? "SYSTEM" : "PROCESS") << std::endl;
+            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::DETACHED ? "DETACHED" : "JOINABLE") << std::endl;
+            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::DEFAULT ? "DEFAULT" : "Custom") << std::endl;
         },
         congzhi::DtorAction::DETACH,
         attr

@@ -11,9 +11,9 @@
 
 1. POSIX 线程封装库 (`pthread_wrapper.hpp`) – 采用 C++ 的 RAII 封装 POSIX 线程源语，提供类似于标准库的更安全的接口，同时保留底层操作的性能。这个库封装有**线程**、**互斥锁**、**锁卫**和**条件变量**等。
 
-2. NUMA 封装库 (`numa_wrapper.hpp`) – 提供对 NUMA 拓扑结构对检测和 CPU/内存等 NUMA 相关资源等管理工具，以实现最佳的 NUMA 数据局部性。（仅限 Linux）
+2. NUMA 封装库 (`numa_namespace.hpp`) – 提供对 NUMA 拓扑结构对检测和 CPU/内存等 NUMA 相关资源等管理工具，以实现最佳的 NUMA 数据局部性。（仅限 Linux）
 
-3. 线程池库 (`thread_pool.hpp`) – 提供灵活且高性能的线程池。在 Linux 上指出 NUMA 感知调度的线程池，在 Linux/macOS 上提供标准线程池供使用。
+3. 线程池库 (`thread_pool.hpp`) – 提供灵活且高性能的线程池。在 Linux 上支持 NUMA 感知调度的线程池，在 Linux/macOS 上提供标准线程池供使用。
 
 ### 1. POSIX 线程封装库 (`pthread_wrapper.hpp`)
 
@@ -154,7 +154,7 @@ int main() {
 }
 ```
 
-- `congzhi::Thread`: 基于 `pthread_t` 的可移动 RAII 线程封装，提供安全易用的线程接口，功能类似于 `std::thread`，但相比之下，`congzhi::Thread`支持通过`ThreadState`枚举线程安全地显示获取线程的状态，同时集成专用的 `ThreadAttribute` 类来为 `pthread` 配置特定属性（`congzhi::Thread` 底层就是 `pthread_t`）。在析构时，自动分离/加入/终止/取消可连接的线程以防止资源泄漏（类似于`std::jthread`）。此外，它提供了 `congzhi::Thread::Start()` 方法，允许线程的延迟启动。以下是几个使用 `congzhi::Thread` 的示例：
+- `congzhi::Thread`: 基于 `pthread_t` 的可移动 RAII 线程封装，提供安全易用的线程接口，功能类似于 `std::thread`，但相比之下，`congzhi::Thread`支持通过`ThreadState`枚举线程安全地显示获取线程的状态，同时集成专用的 `ThreadAttribute` 类来为 `pthread` 配置特定属性（`congzhi::Thread` 底层就是 `pthread_t`）。在析构时，自动分离/加入/终止/取消可连接的线程以防止资源泄漏（类似于`std::jthread`）。此外，它提供了 `congzhi::Thread::Start()` 方法，允许线程的延迟启动。下面我会提供几个使用 `congzhi::Thread` 的示例。（由于线程析构行为和线程属性的参数是后面加的（带默认值），所以现在可变参数并不可用，所以你需要自己手动地绑定参数）
 
 ```cpp
 // 关于Start()方法：
@@ -296,9 +296,9 @@ int main() {
 
     // 设置属性
     attr.SetStackSize(4 * 1024 * 1024); // 以字节为单位的栈大小（默认 8MB）
-    attr.SetScope(congzhi::Scope::System); // 线程竞争 CPU 的范围（默认系统内竞争），也可以设置 Scope::Process，与进程内的线程竞争
-    attr.SetDetachState(congzhi::DetachState::Joinable); // 默认线程是可加入（也可以设置 DetachState::Detached，规定只能分离线程）
-    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::Default, 0); // 设置线程的调度策略和线程优先级（还可以设置 SchedulingPolicy::FIFO/Scheduling::RR）
+    attr.SetScope(congzhi::Scope::SYSTEM); // 线程竞争 CPU 的范围（默认系统内竞争），也可以设置 Scope::PROCESS，与进程内的线程竞争
+    attr.SetDetachState(congzhi::DetachState::JOINABLE); // 默认线程是可加入（也可以设置 DetachState::DETACHED，规定只能分离线程）
+    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::DEFAULT, 0); // 设置线程的调度策略和线程优先级（还可以设置 SchedulingPolicy::FIFO/Scheduling::RR）
     std::cout << "Thread attributes set successfully." << std::endl;
 
     congzhi::Thread t1(
@@ -307,9 +307,9 @@ int main() {
             std::cout << "Thread is running with custom attributes." << std::endl;
             std::cout << "Thread ID: " << pthread_self() << std::endl;
             std::cout << "Thread stack size:" << attr.GetStackSize() << std::endl;
-            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "System" : "Process") << std::endl;
-            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "Detached" : "Joinable") << std::endl;
-            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "Default" : "Custom") << std::endl;
+            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "SYSTEM" : "PROCESS") << std::endl;
+            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "DETACHED" : "JOINABLE") << std::endl;
+            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "DEFAULT" : "Custom") << std::endl;
         },
         congzhi::DtorAction::DETACH, // 设置线程的析构行为是 DETACH
         attr
@@ -324,4 +324,99 @@ int main() {
 }
 ```
 
-### 2. NUMA 封装库
+### 2. NUMA 命名空间
+
+在这个命名空间下的函数并不太多，也没有经过 RAII 的封装，所以你暂时可能需要自己管理一下 NUMA 节点上的内存申请和释放。命名空间下的函数足够我们去检查 NUMA 节点是否可用、绑定线程在特定节点上、申请特定 NUMA 节点上的内存等。
+
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+#include "../numa_namespace.hpp"
+
+
+int main () {
+    if (!congzhi::numa::IsNumaSupported()) {
+        std::cout << "NUMA is not supported on this machine." << std::endl;
+    }
+    std::cout << "The number of NUMA nodes available on the system: " << congzhi::numa::NumaNodeCount() << std::endl
+              << "And the number of total CPU count available on the system: " << congzhi::numa::GetTotalCpuCount() << std::endl;
+    
+    auto node_mask = congzhi::numa::GetNumaNodeMask();
+    congzhi::numa::PrintNumaNodeMask(node_mask);
+    
+    std::cout << "\nI can check the info of NUMA node for you.\n"
+                  "Which node would you like to check? (node num starts at 0)\n"
+                  "Node: ";
+    int num;
+    std::cin >> num;
+    try {
+        // The node available is the online node that total memory is non-zero.
+        std::cout << "\nNode " << num << " online?   \t" << (congzhi::numa::IsNumaNodeOnline(num) ? "Online" : "Not Online")
+                << "\nNode " << num << " available? \t" << (congzhi::numa::IsNumaNodeAvailable(num) ? "Available" : "Not Available")
+                << "\nCPU num on node "   << num << ":\t" << congzhi::numa::GetCpuCountOnNode(num);
+        auto mem_info = congzhi::numa::GetNodeMemoryInfo(num);
+        std::cout << "\nLocal memory info of node " << num << ":" 
+                << "\n\tTotal memory:\t" << mem_info.total_ / (1024 * 1024) << "MB"
+                << "\n\tUsed  memory: \t" << mem_info.used_ / (1024 * 1024) << "MB"
+                << "\n\tFree  memory: \t" << mem_info.free_ / (1024 * 1024) << "MB"
+                << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
+}
+```
+
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+#include "../numa_namespace.hpp"
+
+
+void MonitorMemory(const int numa_node) {
+    for (;;) {
+        auto mem_info = congzhi::numa::GetNodeMemoryInfo(numa_node);
+        std::cout << "\nLocal memory info of node " << numa_node << ":" 
+                << "\n\tTotal memory:\t" << mem_info.total_ / (1024 * 1024) << "MB"
+                << "\n\tUsed  memory: \t" << mem_info.used_ / (1024 * 1024) << "MB"
+                << "\n\tFree  memory: \t" << mem_info.free_ / (1024 * 1024) << "MB"
+                << std::endl;
+        
+        congzhi::this_thread::SleepFor(1000);
+    }    
+}
+
+int main () {
+    const int numa_node = 0;
+    try {
+        auto bound_task = std::bind(MonitorMemory, 0);
+        congzhi::Thread t(
+            bound_task, 
+            congzhi::DtorAction::CANCEL
+        );
+        
+        // Allocate memory
+        const size_t size = static_cast<size_t>(512 * 1024 * 1024);
+        std::cout << "Allocating " << size / (1024 *1024) << " MB\n";
+        void* memory = congzhi::numa::AllocateMemoryOnNode(size, 0);
+        std::cout << "Memory allocated at " << memory << "\n";
+        congzhi::this_thread::SleepFor(2000);
+
+        // Access memory
+        char* char_mem = static_cast<char*>(memory);
+        for(size_t i = 0; i < size; i += 4096) {
+            char_mem[i] = i;
+        }
+        std::cout << "Memory initialized\n";
+        congzhi::this_thread::SleepFor(2000);
+
+        // Free memory
+        congzhi::numa::FreeMemory(memory, size);
+        std::cout << "Memory Freed.\n";
+        congzhi::this_thread::SleepFor(2000);
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+}
+```

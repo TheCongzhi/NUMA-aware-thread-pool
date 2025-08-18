@@ -11,7 +11,7 @@ This repository contains three main components:
 
 1. POSIX Thread Wrapper (`pthread_wrapper.hpp`) – RAII‑style C++ wrapper for POSIX threading primitives, offering standard‑library‑like interfaces for threads, mutexes, lock guards, and condition variables while preserving the performance of low‑level pthread operations.
 
-2. NUMA Wrapper (`numa_wrapper.hpp`) – Utilities to detect NUMA topology and manage CPU/memory binding for optimal data locality (Linux‑only).
+2. NUMA Wrapper (`numa_namespace.hpp`) – Utilities to detect NUMA topology and manage CPU/memory binding for optimal data locality (Linux‑only).
 
 3. Thread Pool (`thread_pool.hpp`) – Flexible, high‑performance pool with NUMA‑aware scheduling for Linux, and a standard mode for Linux/macOS..
 
@@ -156,7 +156,7 @@ int main() {
 }
 ```
 
-- `congzhi::Thread`: A movable RAII thread wrapper built on top of `pthread_t` (POSIX threads), providing a safe and easy-to-use thread usage interface that acts like `std::thread`. Compared to `std::thread`, `congzhi::Thread` offers explicit thread state tracking via the `ThreadState enum`, integrates a dedicated `ThreadAttribute` class for declarative configuration of pthread-specific properties, and automatically detaches/joins/terminates/cancels joinable threads in its destructor to prevent resource leaks (in a way similar to `std::jthread`). Most importantly, it provides the `congzhi::Thread::Start()` method, which allows the delayed start of a thread. I'll put several examples for you on how to use `congzhi::Thread`.
+- `congzhi::Thread`: A movable RAII thread wrapper built on top of `pthread_t` (POSIX threads), providing a safe and easy-to-use thread usage interface that acts like `std::thread`. Compared to `std::thread`, `congzhi::Thread` offers explicit thread state tracking via the `ThreadState enum`, integrates a dedicated `ThreadAttribute` class for declarative configuration of pthread-specific properties, and automatically detaches/joins/terminates/cancels joinable threads in its destructor to prevent resource leaks (in a way similar to `std::jthread`). Most importantly, it provides the `congzhi::Thread::Start()` method, which allows the delayed start of a thread. I'll put several examples for you on how to use `congzhi::Thread`. (Note here, variadic argument not available, you have to bind auguments yoursleves)
 
 ```cpp
 // About the Start() method:
@@ -298,9 +298,9 @@ int main() {
 
     // Set arrtibutes
     attr.SetStackSize(4 * 1024 * 1024); // Stack size in bytes
-    attr.SetScope(congzhi::Scope::System); // or Scope::Process
-    attr.SetDetachState(congzhi::DetachState::Joinable); // or DetachState::Detached
-    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::Default, 0); // or SchedulingPolicy::FIFO/Scheduling::RR
+    attr.SetScope(congzhi::Scope::SYSTEM); // or Scope::PROCESS
+    attr.SetDetachState(congzhi::DetachState::JOINABLE); // or DetachState::Detached
+    attr.SetSchedulingPolicy(congzhi::SchedulingPolicy::DEFAULT, 0); // or SchedulingPolicy::FIFO/Scheduling::RR
     std::cout << "Thread attributes set successfully." << std::endl;
 
     congzhi::Thread t1(
@@ -309,9 +309,9 @@ int main() {
             std::cout << "Thread is running with custom attributes." << std::endl;
             std::cout << "Thread ID: " << pthread_self() << std::endl;
             std::cout << "Thread stack size:" << attr.GetStackSize() << std::endl;
-            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "System" : "Process") << std::endl;
-            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "Detached" : "Joinable") << std::endl;
-            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "Default" : "Custom") << std::endl;
+            std::cout << "Thread scope: " << (attr.GetScope() == congzhi::Scope::System ? "STSTEM" : "PROCESS") << std::endl;
+            std::cout << "Thread detach state: " << (attr.GetDetachState() == congzhi::DetachState::Detached ? "DETACHED" : "JOINABLE") << std::endl;
+            std::cout << "Thread scheduling policy: " << (attr.GetSchedulingPolicy() == congzhi::SchedulingPolicy::Default ? "DEFAULT" : "Custom") << std::endl;
         },
         congzhi::DtorAction::DETACH, // DtorAction
         attr
@@ -326,4 +326,99 @@ int main() {
 }
 ```
 
-### 2. NUMA Wrapper
+### 2. NUMA Namespace
+
+There are no much functions under this namespace. But it is good for you to check NUMA availablity, bind thread localty on NUMA systems, allocate NUMA node specific memory, and operating more specific NUMA operations.
+
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+#include "../numa_namespace.hpp"
+
+
+int main () {
+    if (!congzhi::numa::IsNumaSupported()) {
+        std::cout << "NUMA is not supported on this machine." << std::endl;
+    }
+    std::cout << "The number of NUMA nodes available on the system: " << congzhi::numa::NumaNodeCount() << std::endl
+              << "And the number of total CPU count available on the system: " << congzhi::numa::GetTotalCpuCount() << std::endl;
+    
+    auto node_mask = congzhi::numa::GetNumaNodeMask();
+    congzhi::numa::PrintNumaNodeMask(node_mask);
+    
+    std::cout << "\nI can check the info of NUMA node for you.\n"
+                  "Which node would you like to check? (node num starts at 0)\n"
+                  "Node: ";
+    int num;
+    std::cin >> num;
+    try {
+        // The node available is the online node that total memory is non-zero.
+        std::cout << "\nNode " << num << " online?   \t" << (congzhi::numa::IsNumaNodeOnline(num) ? "Online" : "Not Online")
+                << "\nNode " << num << " available? \t" << (congzhi::numa::IsNumaNodeAvailable(num) ? "Available" : "Not Available")
+                << "\nCPU num on node "   << num << ":\t" << congzhi::numa::GetCpuCountOnNode(num);
+        auto mem_info = congzhi::numa::GetNodeMemoryInfo(num);
+        std::cout << "\nLocal memory info of node " << num << ":" 
+                << "\n\tTotal memory:\t" << mem_info.total_ / (1024 * 1024) << "MB"
+                << "\n\tUsed  memory: \t" << mem_info.used_ / (1024 * 1024) << "MB"
+                << "\n\tFree  memory: \t" << mem_info.free_ / (1024 * 1024) << "MB"
+                << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
+}
+```
+
+```cpp
+#include <iostream>
+#include "../pthread_wrapper.hpp"
+#include "../numa_namespace.hpp"
+
+
+void MonitorMemory(const int numa_node) {
+    for (;;) {
+        auto mem_info = congzhi::numa::GetNodeMemoryInfo(numa_node);
+        std::cout << "\nLocal memory info of node " << numa_node << ":" 
+                << "\n\tTotal memory:\t" << mem_info.total_ / (1024 * 1024) << "MB"
+                << "\n\tUsed  memory: \t" << mem_info.used_ / (1024 * 1024) << "MB"
+                << "\n\tFree  memory: \t" << mem_info.free_ / (1024 * 1024) << "MB"
+                << std::endl;
+        
+        congzhi::this_thread::SleepFor(1000);
+    }    
+}
+
+int main () {
+    const int numa_node = 0;
+    try {
+        auto bound_task = std::bind(MonitorMemory, 0);
+        congzhi::Thread t(
+            bound_task, 
+            congzhi::DtorAction::CANCEL
+        );
+        
+        // Allocate memory
+        const size_t size = static_cast<size_t>(512 * 1024 * 1024);
+        std::cout << "Allocating " << size / (1024 *1024) << " MB\n";
+        void* memory = congzhi::numa::AllocateMemoryOnNode(size, 0);
+        std::cout << "Memory allocated at " << memory << "\n";
+        congzhi::this_thread::SleepFor(2000);
+
+        // Access memory
+        char* char_mem = static_cast<char*>(memory);
+        for(size_t i = 0; i < size; i += 4096) {
+            char_mem[i] = i;
+        }
+        std::cout << "Memory initialized\n";
+        congzhi::this_thread::SleepFor(2000);
+
+        // Free memory
+        congzhi::numa::FreeMemory(memory, size);
+        std::cout << "Memory Freed.\n";
+        congzhi::this_thread::SleepFor(2000);
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+}
+```
