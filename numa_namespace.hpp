@@ -16,6 +16,7 @@
 #include <numaif.h> // linux syscall interface
 #include <unistd.h> // For sysconf
 #include <errno.h>
+
 #include <stdexcept>
 #include <iostream>
 #include <string>
@@ -39,7 +40,8 @@ bool IsNumaSupported() {
  * @return Number of NUMA nodes.
  */
 int NumaNodeCount() {
-    return numa_max_node() + 1;
+    //return numa_max_node() + 1;
+    return numa_num_configured_nodes();
 }
 
 /**
@@ -48,11 +50,12 @@ int NumaNodeCount() {
  * @param node The NUMA node index to check.
  * @return true if the node is online, false otherwise.
  */
-bool IsNumaNodeOnline(int node) {
+bool IsNumaNodeOnline(const int node) {
     if (node < 0 || node >= NumaNodeCount()) {
         return false;
     }
-    return numa_node_online(node);
+    struct bitmask* node_mask = numa_get_mems_allowed();
+    return numa_bitmask_isbitset(node_mask, node);
 }
 
 /**
@@ -61,16 +64,56 @@ bool IsNumaNodeOnline(int node) {
  * @param node The NUMA node index to check.
  * @return true if the node is available, false otherwise.
  */
-bool IsNumaNodeAvailable(int node) {
+bool IsNumaNodeAvailable(const int node) {
     if (!IsNumaNodeOnline(node)) {
         return false;
     }
 
-    long long total_memory = numa_node_size64(node, nullptr);
+    const long long total_memory = numa_node_size64(node, nullptr);
     if (total_memory <= 0) {
         return false;
     }
     return true;
+}
+
+/**
+ * @brief Gets the NUMA node mask as a bitmask
+ * @pre Must be called only if IsNumaSupported() returns true.
+ * @return std::vector<bool> representing the NUMA node mask (true for available nodes)
+ * @warning std::vector<bool> is a specialized container that uses proxy objects 
+ *          instead of actual bool references. This may lead to unexpected behavior
+ *          when taking references or pointers to elements.
+ */
+std::vector<bool> GetNumaNodeMask() {
+    const int max_node = numa_max_node();
+    std::vector<bool> mask(max_node + 1, false);
+    
+    for (int node = 0; node <= max_node; ++node) {
+        mask[node] = IsNumaNodeAvailable(node);
+    }
+    return mask;
+}
+
+/**
+ * @brief Prints the NUMA node mask in a human-readable format, use this with GetNumaNodeMask().
+ * @pre Must be called only if IsNumaSupported() returns true.
+ * @param mask The NUMA node mask to print
+ */
+void PrintNumaNodeMask(const std::vector<bool>& mask) {
+    std::cout << "NUMA Node Mask: [";
+    for (size_t i = 0; i < mask.size(); ++i) {
+        std::cout << (mask[i] ? "■" : "□");
+        if (i < mask.size() - 1) std::cout << " ";
+    }
+    std::cout << "]\n";
+    std::cout << "Availability: ";
+    for (size_t i = 0; i < mask.size(); ++i) {
+        if (mask[i]) {
+            std::cout << "Node " << i << ", ";
+        }
+    }
+    std::cout << "\b\b are available\n"; // Remove trailing comma
+
 }
 
 /**
@@ -87,12 +130,11 @@ int GetTotalCpuCount() {
  * @pre Must be called only if IsNumaSupported() returns true.
  * @param node The NUMA node index.
  * @return Returns the number of CPUs on the specified NUMA node.
- * @throws std::out_of_range if the node index is invalid. 
- * @throws std::runtime_error if CPU mask allocation or retrieval fails.
+ * @throws std::runtime_error if node is unavailable or CPU mask allocation or retrieval fails.
  */
-int GetCpuCountOnNode(int node) {
+int GetCpuCountOnNode(const int node) {
     if (!IsNumaNodeAvailable(node)) {
-        throw std::runtime_error("NUMA node" + std::to_string(node) + " is not available");
+        throw std::runtime_error("NUMA node " + std::to_string(node) + " is not available");
     }
 
     struct bitmask* cpumask = numa_allocate_cpumask();
@@ -105,7 +147,7 @@ int GetCpuCountOnNode(int node) {
         throw std::runtime_error("Failed to get CPUs for NUMA node");
     }
 
-    int cpu_count = numa_bitmask_weight(cpumask);
+    const int cpu_count = numa_bitmask_weight(cpumask);
 
     numa_free_cpumask(cpumask);
     return cpu_count;
@@ -119,26 +161,16 @@ int GetCpuCountOnNode(int node) {
  * @throws std::out_of_range if the CPU index is invalid.
  * @throws std::runtime_error if node retrieval fails.  
  */
-int GetNodeOfCpu(int cpu) {
+int GetNodeOfCpu(const int cpu) {
     if (cpu < 0 || cpu >= GetTotalCpuCount()) {
         throw std::out_of_range("Invalid CPU index");
     }
-    int node = numa_node_of_cpu(cpu);
+    const int node = numa_node_of_cpu(cpu);
     if (node < 0) {
-        throw std::runtime_error("Failed to get NUMA node of CPU: " + std::string(strerror(errno)));
+        int err = errno;
+        throw std::runtime_error("Failed to get NUMA node of CPU: " + std::string(strerror(err)));
     }
     return node;
-}
-
-/**
- * @brief Binds the current thread to a specific NUMA node.
- * @pre Must be called only if IsNumaSupported() returns true.
- * @param node The NUMA node index to bind the current thread to.
- * @throws std::out_of_range if the node index is invalid.
- * @throws std::runtime_error if CPU affinity setting fails.
- */
-void BindThreadToNumaNode(int node) {
-    BindThreadToNumaNode(pthread_self(), node);
 }
 
 /**
@@ -146,10 +178,9 @@ void BindThreadToNumaNode(int node) {
  * @pre Must be called only if IsNumaSupported() returns true.
  * @param thread The pthread_t handle of the thread to bind.
  * @param node The NUMA node index to bind the thread to.
- * @throws std::out_of_range if the node index is invalid.
- * @throws std::runtime_error if CPU affinity setting fails.
+ * @throws std::runtime_error if node is unavailable or affinity setting fails.
  */
-void BindThreadToNumaNode(pthread_t thread,int node) {
+void BindThreadToNumaNode(const pthread_t thread, const int node) {
     if (!IsNumaNodeAvailable(node)) {
         throw std::runtime_error("NUMA node" + std::to_string(node) + " is not available");
     }
@@ -157,7 +188,7 @@ void BindThreadToNumaNode(pthread_t thread,int node) {
     // Get the CPU mask associated with the specified NUMA node
     struct bitmask* cpumask = numa_allocate_cpumask();
     if (numa_node_to_cpus(node, cpumask) != 0) {
-        numa_free_nodemask(cpumask);
+        numa_free_cpumask(cpumask);
         throw std::runtime_error("Failed to get CPUs for NUMA node" + std::to_string(node));
     }
 
@@ -169,9 +200,42 @@ void BindThreadToNumaNode(pthread_t thread,int node) {
             CPU_SET(i, &cpuset);
         }
     }
-    int res = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
     numa_free_cpumask(cpumask);
     
+    const int res = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+    if (res != 0) {
+        throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(res)));
+    }
+}
+
+/**
+ * @brief Binds the current thread to a specific NUMA node.
+ * @pre Must be called only if IsNumaSupported() returns true.
+ * @param node The NUMA node index to bind the current thread to.
+ * @throws std::runtime_error if node is unavailable or CPU affinity setting fails.
+ */
+void BindThreadToNumaNode(const int node) {
+    BindThreadToNumaNode(pthread_self(), node);
+}
+
+/**
+ * @brief Binds a specific thread to a given CPU.
+ * @pre Must be called only if IsNumaSupported() returns true.
+ * @param thread The pthread_t handle of the thread to bind.
+ * @param cpu The CPU index to bind the thread to.
+ * @throws std::out_of_range if the CPU index is invalid.
+ * @throws std::runtime_error if CPU affinity setting fails.
+ */
+void BindThreadToCpu(const pthread_t thread, const int cpu) {
+    if (cpu < 0 || cpu >= GetTotalCpuCount()) {
+        throw std::out_of_range("Invalid CPU index");
+    }
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu, &cpuset);
+
+    const int res = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
     if (res != 0) {
         throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(res)));
     }
@@ -189,44 +253,43 @@ void BindThreadToCpu(const int cpu) {
 }
 
 /**
- * @brief Binds a specific thread to a given CPU.
- * @pre Must be called only if IsNumaSupported() returns true.
- * @param thread The pthread_t handle of the thread to bind.
- * @param cpu The CPU index to bind the thread to.
- * @throws std::out_of_range if the CPU index is invalid.
- * @throws std::runtime_error if CPU affinity setting fails.
- */
-void BindThreadToCpu(pthread_t thread, const int cpu) {
-    if (cpu < 0 || cpu >= GetTotalCpuCount()) {
-        throw std::out_of_range("Invalid CPU index");
-    }
-
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(cpu, &cpuset);
-
-    int res = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-    if (res != 0) {
-        throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(res)));
-    }
-}
-
-/**
  * @brief Gets the NUMA node of the CPU where the current thread is running.
  * @pre Must be called only if IsNumaSupported() returns true.
  * @return The NUMA node index.
  * @throws std::runtime_error if CPU or node detection fails.
  */
 int GetNodeCurrentThreadIsOn() {
-    int cpu = sched_getcpu();
+    const int cpu = sched_getcpu();
     if (cpu < 0) {
-        throw std::runtime_error("Failed to get current CPU: " + std::string(strerror(errno)));
+        int err = errno;
+        throw std::runtime_error("Failed to get current CPU: " + std::string(strerror(err)));
     }
-    int node = numa_node_of_cpu(cpu);
+    const int node = numa_node_of_cpu(cpu);
     if (node < 0) {
-        throw std::runtime_error("Failed to get NUMA node of CPU: " + std::string(strerror(errno)));
+        int err = errno;
+        throw std::runtime_error("Failed to get NUMA node of CPU: " + std::string(strerror(err)));
     }
     return node;
+}
+
+/**
+ * @brief Round up a size to the next multiple of page size on underlying system.
+ * @param size The memory size in bytes.
+ * @return The rounded-up size in bytes.
+ * @throws std::invalid_argument if the size value is negitive or zero.
+ * @throw std::runtime_error if the page size connot be obtained. 
+ */
+size_t RoundUpToPageSize(const size_t size) {
+    if ((size & (size_t(1) << (sizeof(size_t) * 8 -1)) !=0) || (size == 0)) {
+        throw std::invalid_argument("Size cannot be negative or zero.");
+    }
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        int err = errno;
+        throw std::runtime_error("Failed to get page size: " + std::string(strerror(err)));
+    }
+    const size_t page_size_u = static_cast<size_t>(page_size);
+    return (size + page_size_u -1) & ~(page_size_u -1);
 }
 
 /**
@@ -235,18 +298,15 @@ int GetNodeCurrentThreadIsOn() {
  * @param size The size of memory to allocate in bytes.
  * @param node The NUMA node index.
  * @return Pointer to the allocated memory.
- * @throws std::out_of_range if the node index is invalid.
- * @throws std::invalid_argument if size is zero.
- * @throws std::runtime_error if allocation fails.
+ * @throws std::runtime_error if node is unavailable or allocation fails.
+ * @throws std::invalid_argument if the size value is negitive or zero.
  */
-void* AllocateMemoryOnNode(size_t size, int node) {
+void* AllocateMemoryOnNode(const size_t size, const int node) {
     if (!IsNumaNodeAvailable(node)) {
         throw std::runtime_error("NUMA node" + std::to_string(node) + " is not available");
     }
-    if (size <= 0) {
-        throw std::invalid_argument("Size must be greater than zero");
-    }
-    void* ptr = numa_alloc_onnode(size, node);
+    const size_t rounded_up_size = RoundUpToPageSize(size);
+    void* ptr = numa_alloc_onnode(rounded_up_size, node);
     if (!ptr) {
         throw std::runtime_error("Failed to allocate memory on NUMA node " + std::to_string(node));
     }
@@ -258,16 +318,14 @@ void* AllocateMemoryOnNode(size_t size, int node) {
  * @pre Must be called only if IsNumaSupported() returns true.
  * @param size The size of memory to allocate in bytes.
  * @return Pointer to the allocated memory.
- * @throws std::invalid_argument if size is zero.
+ * @throws std::invalid_argument if the size value is negitive or zero.
  * @throws std::runtime_error if allocation fails.
  */
-void* AllocateMemoryInterleaved(size_t size) {
-    if (size <= 0) {
-        throw std::invalid_argument("Size must be greater than zero");
-    }
-    void* ptr = numa_alloc_interleaved(size);
+void* AllocateMemoryInterleaved(const size_t size) {
+    const size_t rounded_up_size = RoundUpToPageSize(size);
+    void* ptr = numa_alloc_interleaved(rounded_up_size);
     if (!ptr) {
-        throw std::runtime_error("Failed to allocate interleaved memory on NUMA nodes");
+        throw std::runtime_error("Failed to allocate interleaved memory on NUMA nodes.");
     }
     return ptr;
 }
@@ -278,7 +336,7 @@ void* AllocateMemoryInterleaved(size_t size) {
  * @param ptr Pointer to the memory block.
  * @param size Size of the memory block in bytes.
  */
-void FreeMemory(void* ptr, size_t size) {
+void FreeMemory(void* const ptr, const size_t size) {
     if (ptr) {
         numa_free(ptr, size);
     }
@@ -290,11 +348,10 @@ void FreeMemory(void* ptr, size_t size) {
  * @param ptr Pointer to the memory block to migrate.
  * @param size Size of the memory block in bytes.
  * @param node The NUMA node index to migrate the memory to.
- * @throws std::out_of_range if the node index is invalid.
+ * @throws std::runtime_error if node is unvailable or migration fails.
  * @throws std::invalid_argument if ptr is null or size is zero.
- * @throws std::runtime_error if migration fails.
  */
-void MigrateMemoryToNode(void* ptr, size_t size, int node) {
+void MigrateMemoryToNode(void* ptr, size_t size, const int node) {
     if (!IsNumaNodeAvailable(node)) {
         throw std::runtime_error("NUMA node " + std::to_string(node) + " is not available");
     }
@@ -302,16 +359,14 @@ void MigrateMemoryToNode(void* ptr, size_t size, int node) {
     if (ptr == nullptr) {
         throw std::invalid_argument("Pointer cannot be null");
     }
-    if (size <= 0) {
-        throw std::invalid_argument("Size cannot be zero");
-    }
 
-    // page-aligned check
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size == -1) {
-        throw std::runtime_error("Failed to get page size: " + std::string(strerror(errno)));
+    size_t rounded_up_size = RoundUpToPageSize(size);
+    
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        int err = errno;
+        throw std::runtime_error("Failed to get page size: " + std::string(strerror(err)));
     }
-
     uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(ptr);
     if (ptr_addr % page_size != 0) {
         throw std::invalid_argument("Pointer is not page-aligned (required for migration)");
@@ -321,11 +376,8 @@ void MigrateMemoryToNode(void* ptr, size_t size, int node) {
     }
 
     // Migrate memory to the specified NUMA node
-    int res = numa_migrate_memory(ptr, size, node);
-    if (res != 0) {
-        throw std::runtime_error("Migration to node " + std::to_string(node) + " failed: " + 
-                               std::string(strerror(errno)));
-    }
+    numa_tonode_memory(ptr, rounded_up_size, node);
+    
 }
 
 struct NodeMemory { // struct to hold memory info of a NUMA node
@@ -342,13 +394,13 @@ struct NodeMemory { // struct to hold memory info of a NUMA node
  * @throws std::out_of_range if the node index is invalid.
  * @throws std::runtime_error if memory info retrieval fails.
  */
-NodeMemory GetNodeMemoryInfo(int node) {
+NodeMemory GetNodeMemoryInfo(const int node) {
     if (!IsNumaNodeAvailable(node)) {
         throw std::runtime_error("NUMA node " + std::to_string(node) + " is not available");
     }
 
     // Get total and free memory size of the NUMA node
-    long long free;
+    long long free = 0;
     long long total = numa_node_size64(node, &free);
     if (total < 0 || free < 0) {
         throw std::runtime_error("Failed to get memory info for node " + std::to_string(node));
@@ -357,5 +409,7 @@ NodeMemory GetNodeMemoryInfo(int node) {
 }
 
 } // namespace congzhi::numa
+#else
+#error "numa_namespace only on Linux platforms."
 #endif // defined(__linux__)
 #endif // NUMA_NAMESPACE_HPP
