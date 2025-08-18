@@ -21,6 +21,9 @@
 #include <signal.h> // For congzhi::Thread::DtorAction::TERMINATE (pthread_kill)
 #include <time.h>
 
+#if defined __linux__
+#include <cxxabi.h> // For catching abi::__forced_unwind, triggered by my Cancel() logic I suppose? (People say it's a bug reported in GCC, which has been filed in the GCC Bugzilla as bug 100415.)
+#endif
 
 #include <cstring>
 #include <functional>
@@ -302,7 +305,7 @@ private:
 
     #ifdef __linux__
     static constexpr clockid_t clock_type = CLOCK_MONOTONIC;
-    using InternalrClock = std::chrono::steady_clock;
+    using InternalClock = std::chrono::steady_clock;
     #else // __APPLE__ OSX has some buggy features to MONOTONIC
     static constexpr clockid_t clock_type = CLOCK_REALTIME;
     using InternalClock = std::chrono::system_clock;
@@ -952,8 +955,17 @@ private:
         std::unique_ptr<ThreadDataBase> data(static_cast<ThreadDataBase*>(arg));
         try {
             data->Execute();
-        } catch (...) {
-            // Log or handle exceptions here if needed.
+        }
+        
+        
+        #if defined __linux__
+        catch (abi::__forced_unwind&) {
+            throw;
+        }
+        #endif
+
+        catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() <<std::endl;
         }
 
         // update property if it's not expired
@@ -1448,7 +1460,7 @@ namespace this_thread {
             ts.tv_sec = seconds;
             ts.tv_nsec = nanoseconds;
 
-            int res = clock_nanosleep(CLOCK_REALTIME, TIME_ABSTIME, &ts, nullptr);
+            int res = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &ts, nullptr);
 
             if (res != 0) {
                 if (res = EINTR) {
