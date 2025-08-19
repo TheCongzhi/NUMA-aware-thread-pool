@@ -544,14 +544,20 @@ enum class DetachState {
  * @brief Enum representing the scheduling policy for threads.
  * 
  * Priority values for scheduling policies:
- * - SCHED_OTHER: Default scheduling policy (0 priority).
- * - SCHED_FIFO: Platform specific.
- * - SCHED_RR: Platform specific.
+ * - On Linux:
+ *      - FIFO: Real-time first-in-first-out scheduling policy (1-99 priorities), need root.
+ *      - RR: Real-time round-robin scheduling policy (1-99 priorities), need root.
+ *      - DEFAULT: Default scheduling policy (0 priority).
+ * - On macOS
+ *      - FIFO: Real-time first-in-first-out scheduling policy (0-47 priorities).
+ *      - RR: Real-time round-robin scheduling policy (0-47 priorities).
+ *      - DEFAULT: Standard priority.
+ * @note On macOS, FIFO and RR scheduling policy may not behave as what you might expected.
  */
 enum class SchedulingPolicy {
-    DEFAULT, // Default scheduling policy (Completely Fair Scheduler for Linux and Core Foundation Scheduler for macOS).
-    FIFO,    // First In First Out scheduling policy.
-    RR // Round Robin scheduling policy.
+    FIFO,       // Real-time first-in-first-out scheduling policy.
+    RR,         // Real-time round-robin scheduling policy.
+    DEFAULT,    // Default scheduling policy (Completely Fair Scheduler).
 };
 
 /**
@@ -566,7 +572,7 @@ public:
      * @brief Constructs and initializes the thread attributes with default settings.
      * @throws std::runtime_error if initialization fails.
      */
-    ThreadAttribute() {
+    explicit ThreadAttribute() {
         const int res = pthread_attr_init(&attr_handle_);
         if (res != 0) {
             throw std::runtime_error("pthread_attr_init failed: " + std::string(strerror(res)));
@@ -617,62 +623,76 @@ public:
 
     /**
      * @brief Sets the scheduling policy and priority for threads created with these attributes.
-     * @param policy The scheduling policy to set (default is SchedulingPolicy::DEFAULT, which is SCHED_OTHER).
+     * @param policy The scheduling policy to set.
      * @param priority The priority level (default is 0).
-     * @throws std::runtime_error if setting scheduling policy or priority fails.
+     * @throw std::invalid_argument if DEFAULT priority is not 0 or policy is not supported.
+     * @throw std::runtime_error if setting scheduling policy or priority fails.
+     * @throw std::out_of_range if priority out-of-range.
      */
     void SetSchedulingPolicy(SchedulingPolicy policy = SchedulingPolicy::DEFAULT, int priority = 0) {
+        // explicitly inherit the settings to pthread_attr_t
+        const int res_inherit = pthread_attr_setinheritsched(&attr_handle_, PTHREAD_EXPLICIT_SCHED);
+        if (res_inherit != 0) {
+            throw std::runtime_error("pthread_attr_setinheritsched failed: " + std::string(strerror(res_inherit)));
+        }
+        
+        struct sched_param param;
         int policy_value;
+
         switch (policy) {
             case SchedulingPolicy::DEFAULT: {
                 policy_value = SCHED_OTHER; // Default scheduling policy
-                const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
-                if (res != 0) {
-                    throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res)));
-                }
                 if (priority != 0) {
-                    throw std::invalid_argument("Priority must be 0 for SCHED_OTHER");
+                    throw std::invalid_argument("Priority must be 0 under DEFAULT scheduling.");
                 }
-                break;
-            }
-            case SchedulingPolicy::FIFO: {
-                policy_value = SCHED_FIFO; // First In First Out scheduling policy
-                const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
-                if (res != 0) {
-                    throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res)));
-                }
-                if (priority < sched_get_priority_min(SCHED_FIFO) || 
-                    priority > sched_get_priority_max(SCHED_FIFO)) {
-                    throw std::out_of_range("Priority out of range for SCHED_FIFO");
-                }
-                struct sched_param param;
-                param.sched_priority = priority;
-                const int res2 = pthread_attr_setschedparam(&attr_handle_, &param);
-                if (res2 != 0) {
-                    throw std::runtime_error("pthread_attr_setschedparam failed: " + std::string(strerror(res2)));
-                }
+                param.sched_priority = 0;
                 break;
             }
             case SchedulingPolicy::RR: {
                 policy_value = SCHED_RR; // Round Robin scheduling policy
-                const int res = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
-                if (res != 0) {
-                    throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res)));
-                }
-                if (priority < sched_get_priority_min(SCHED_RR) || 
-                    priority > sched_get_priority_max(SCHED_RR)) {
+                #if defined __APPLE__
+                constexpr int min_prior = 0;
+                constexpr int max_prior = 47;
+                #else
+                const int min_prior = sched_get_priority_min(SCHED_RR);
+                const int max_prior = sched_get_priority_max(SCHED_RR);
+                #endif
+                if (priority < min_prior || priority > max_prior) {
                     throw std::out_of_range("Priority out of range for SCHED_RR");
                 }
-                struct sched_param param;
                 param.sched_priority = priority;
-                const int res2 = pthread_attr_setschedparam(&attr_handle_, &param);
-                if (res2 != 0) {
-                    throw std::runtime_error("pthread_attr_setschedparam failed: " + std::string(strerror(res2)));
+                break;
+            }
+            case SchedulingPolicy::FIFO: {
+                policy_value = SCHED_FIFO; // First In First Out scheduling policy
+                #if defined __APPLE__
+                constexpr int min_prior = 0;
+                constexpr int max_prior = 47;
+                #else
+                const int min_prior = sched_get_priority_min(SCHED_RR);
+                const int max_prior = sched_get_priority_max(SCHED_RR);
+                #endif
+                if (priority < min_prior || priority > max_prior) {
+                    throw std::out_of_range("Priority out of range for SCHED_FIFO");
                 }
+                param.sched_priority = priority;
                 break;
             }
             default:
                 throw std::invalid_argument("Invalid scheduling policy");
+        }
+
+        const int res_policy = pthread_attr_setschedpolicy(&attr_handle_, policy_value);
+        if (res_policy != 0) {
+            if (res_policy == EPERM) {
+                throw std::runtime_error("Permission denied: requires root privileges");
+            }
+            throw std::runtime_error("pthread_attr_setschedpolicy failed: " + std::string(strerror(res_policy)));
+        }
+
+        const int res_param = pthread_attr_setschedparam(&attr_handle_, &param);
+        if (res_param != 0) {
+            throw std::runtime_error("pthread_attr_setschedparam failed: " + std::string(strerror(res_param)));
         }
     }
 
@@ -689,9 +709,10 @@ public:
         }
         switch (policy) {
             case SCHED_OTHER: return SchedulingPolicy::DEFAULT;
-            case SCHED_FIFO: return SchedulingPolicy::FIFO;
             case SCHED_RR: return SchedulingPolicy::RR;
+            case SCHED_FIFO: return SchedulingPolicy::FIFO;
             default: throw std::runtime_error("Unknown scheduling policy");
+            
         }
     }
 
@@ -1026,15 +1047,16 @@ public:
      * @tparam TFunc Callable type.
      * @tparam TArgs Argument types.
      * @param f Callable object.
-     * @param args Arguments to pass to the callable.
      * @param dtor_action Action to take on thread destruction.
      * @param attr Thread attributes for creation.
+     * @param args Arguments to pass. (use std::bind or lambdas instead)
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
-    explicit Thread(TFunc&& f, TArgs&&... args, 
+    explicit Thread(TFunc&& f,
                     DtorAction dtor_action = DefaultDtorAction,
-                    const ThreadAttribute& attr = ThreadAttribute()) {
+                    const ThreadAttribute& attr = ThreadAttribute(),
+                    TArgs&&... args) {
         Start(std::forward<TFunc>(f), std::forward<TArgs>(args)..., dtor_action, attr);
     }
     
@@ -1086,16 +1108,17 @@ public:
      * @tparam TFunc Callable type.
      * @tparam TArgs Argument types.
      * @param f Callable object.
-     * @param args Arguments to pass to the callable.
      * @param dtor_action Action to take on thread destruction.
      * @param attr Thread attributes for creation.
+     * @param args Arguments to pass (use std::bind or lambdas instead)
      * @throws std::logic_error if thread is already running.
      * @throws std::runtime_error if thread creation fails.
      */
     template <typename TFunc, typename... TArgs>
-    void Start(TFunc&& f, TArgs&&... args, 
+    void Start(TFunc&& f, 
                DtorAction dtor_action = DefaultDtorAction,
-               const ThreadAttribute& attr = ThreadAttribute()) 
+               const ThreadAttribute& attr = ThreadAttribute(),
+               TArgs&&... args) 
     {
         auto property = property_;    
         congzhi::LockGuard<congzhi::Mutex> lock(property->mutex);
@@ -1260,9 +1283,9 @@ public:
      * @throws std::logic_error if the thread is not running.
      * @throws std::runtime_error if termination fails.
      * @note This method sends a SIGTERM signal to the thread using pthread_kill.
-     *       The target thread should register a signal handler for SIGTERM to handle graceful termination.
-     *       If the thread does not handle SIGTERM, the default behavior may terminate the thread,
-     *       but it will not terminate the entire process unless the signal is unhandled and critical.
+     *       The target thread MUST register a signal handler for SIGTERM to handle graceful termination.
+     *       If the thread does not handle SIGTERM, the default behavior will not be terminating the 
+     *       single thread, but the entire process.
      */
     void Terminate() {
         auto property = property_;
